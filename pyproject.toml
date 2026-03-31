@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "facialgen"
+version = "0.1.0"
+description = "Graph curvature and facial walk utilities"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+]
+
+[tool.setuptools]
+packages = ["facialgen"]

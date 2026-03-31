@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+facialgen/__init__.py
+facialgen/curvature.py
+facialgen/data.py
+facialgen/rotation_systems.py
+facialgen/types.py
+facialgen.egg-info/PKG-INFO
+facialgen.egg-info/SOURCES.txt
+facialgen.egg-info/dependency_links.txt
+facialgen.egg-info/requires.txt
+facialgen.egg-info/top_level.txt

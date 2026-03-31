@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import unittest
+from collections import Counter
+
+import numpy as np
+import scipy.sparse as sp
+
+from facialgen.data import CyclicFaceChunkDataset, FacialWalkVertexDataset
+from facialgen.early_stopping import (
+    connected_link_prediction_split,
+    edge_overlap_ratio,
+)
+from facialgen.evaluation import (
+    average_rank_from_graph_statistics,
+    compute_graph_statistics,
+    reconstruct_graph_from_generated_walks,
+)
+
+
+def toy_graph() -> tuple[sp.csr_matrix, np.ndarray]:
+    A = sp.csr_matrix(
+        np.array(
+            [
+                [0, 1, 1, 0],
+                [1, 0, 1, 1],
+                [1, 1, 0, 1],
+                [0, 1, 1, 0],
+            ],
+            dtype=float,
+        )
+    )
+    curvature = np.array([0.1, -0.2, 0.3, 0.4], dtype=float)
+    return A, curvature
+
+
+class FacialWalkDatasetSmokeTests(unittest.TestCase):
+    def test_full_face_sequences_have_boundary_tokens(self) -> None:
+        A, curvature = toy_graph()
+        face_ds = FacialWalkVertexDataset(
+            A,
+            curvature,
+            num_sign_configs=3,
+            sign_seed=7,
+        )
+
+        self.assertGreater(len(face_ds), 0)
+        sample = face_ds[0]
+
+        self.assertEqual(int(sample["tokens"][0]), face_ds.bos_token_id)
+        self.assertEqual(int(sample["tokens"][-1]), face_ds.eos_token_id)
+        self.assertEqual(sample["sequence_length"], int(sample["tokens"].numel()))
+        self.assertIn(sample["sign_config_index"], range(3))
+        self.assertGreaterEqual(sample["face_index_within_config"], 0)
+
+    def test_chunk_dataset_changes_rotation_across_epochs(self) -> None:
+        A, curvature = toy_graph()
+        face_ds = FacialWalkVertexDataset(
+            A,
+            curvature,
+            num_sign_configs=2,
+            sign_seed=11,
+        )
+        chunk_ds = CyclicFaceChunkDataset(face_ds, context_size=5, epoch_seed=19)
+
+        face_idx = 0
+        original = face_ds.sequences[face_idx]
+        self.assertGreater(len(original), 3)
+
+        def collect_chunks(epoch: int) -> np.ndarray:
+            chunk_ds.set_epoch(epoch)
+            pieces = []
+            for idx, (mapped_face_idx, _) in enumerate(chunk_ds.chunk_to_face):
+                if mapped_face_idx == face_idx:
+                    pieces.append(chunk_ds[idx]["tokens"].numpy())
+            return np.concatenate(pieces)
+
+        seq_e0 = collect_chunks(0)
+        seq_e1 = collect_chunks(1)
+
+        self.assertEqual(seq_e0[0], face_ds.bos_token_id)
+        self.assertEqual(seq_e0[-1], face_ds.eos_token_id)
+        self.assertEqual(len(seq_e0), len(original))
+        self.assertEqual(len(seq_e1), len(original))
+        self.assertEqual(Counter(seq_e0[1:-1].tolist()), Counter(original[1:-1].tolist()))
+        self.assertEqual(Counter(seq_e1[1:-1].tolist()), Counter(original[1:-1].tolist()))
+        self.assertFalse(np.array_equal(seq_e0, seq_e1))
+
+
+class EvaluationSmokeTests(unittest.TestCase):
+    def test_connected_link_prediction_split_keeps_train_connected(self) -> None:
+        A = sp.csr_matrix(
+            np.array(
+                [
+                    [0, 1, 1, 0, 0],
+                    [1, 0, 1, 1, 0],
+                    [1, 1, 0, 1, 1],
+                    [0, 1, 1, 0, 1],
+                    [0, 0, 1, 1, 0],
+                ],
+                dtype=float,
+            )
+        )
+        split = connected_link_prediction_split(
+            A,
+            val_fraction=0.1,
+            test_fraction=0.1,
+            seed=3,
+        )
+        train_adj = split["train_adj"]
+        n_components, _ = sp.csgraph.connected_components(train_adj, directed=False)
+        self.assertEqual(n_components, 1)
+        self.assertGreater(len(split["val_edges"]), 0)
+        self.assertGreater(len(split["test_edges"]), 0)
+
+    def test_reconstruct_graph_from_generated_walks(self) -> None:
+        walks = [
+            [4, 0, 1, 2, 3, 5],
+            [4, 1, 2, 1, 0, 5],
+            [4, 2, 3, 2, 1, 5],
+        ]
+
+        A_hat, S = reconstruct_graph_from_generated_walks(
+            walks,
+            num_nodes=4,
+            target_num_edges=3,
+            seed=0,
+        )
+
+        self.assertEqual(S.shape, (4, 4))
+        self.assertEqual(A_hat.shape, (4, 4))
+        self.assertEqual((A_hat != A_hat.T).nnz, 0)
+        self.assertEqual(A_hat.diagonal().sum(), 0.0)
+        self.assertTrue(np.all(np.isin(A_hat.data, [1.0])))
+        self.assertGreaterEqual(A_hat.nnz, 2)
+
+    def test_edge_overlap_ratio(self) -> None:
+        A_ref = sp.csr_matrix(
+            np.array(
+                [
+                    [0, 1, 1],
+                    [1, 0, 0],
+                    [1, 0, 0],
+                ],
+                dtype=float,
+            )
+        )
+        A_gen = sp.csr_matrix(
+            np.array(
+                [
+                    [0, 1, 0],
+                    [1, 0, 1],
+                    [0, 1, 0],
+                ],
+                dtype=float,
+            )
+        )
+        self.assertAlmostEqual(edge_overlap_ratio(A_gen, A_ref), 0.5)
+
+    def test_graph_statistics_on_triangle_graph(self) -> None:
+        A = sp.csr_matrix(
+            np.array(
+                [
+                    [0, 1, 1],
+                    [1, 0, 1],
+                    [1, 1, 0],
+                ],
+                dtype=float,
+            )
+        )
+        labels = np.array([0, 0, 1])
+        stats = compute_graph_statistics(A, labels=labels)
+
+        self.assertEqual(stats["max_degree"], 2.0)
+        self.assertEqual(stats["triangle_count"], 1.0)
+        self.assertAlmostEqual(stats["clustering_coeff"], 1.0)
+        self.assertAlmostEqual(stats["characteristic_path_len"], 1.0)
+        self.assertAlmostEqual(stats["intra_community_density"], 1.0)
+        self.assertAlmostEqual(stats["inter_community_density"], 1.0)
+
+    def test_average_rank_helper(self) -> None:
+        ref = {"max_degree": 2.0, "assortativity": 0.0}
+        cands = [
+            {"max_degree": 2.0, "assortativity": 0.1},
+            {"max_degree": 3.0, "assortativity": 0.0},
+        ]
+        avg_rank, per_metric = average_rank_from_graph_statistics(ref, cands)
+
+        self.assertEqual(avg_rank.shape, (2,))
+        self.assertEqual(set(per_metric.keys()), {"max_degree", "assortativity"})
+        self.assertTrue(np.all(avg_rank >= 1.0))
+
+
+if __name__ == "__main__":
+    unittest.main()
