@@ -10,14 +10,14 @@ except ImportError as exc:  # pragma: no cover - torch is optional for the packa
     raise ImportError("facialgen.models requires PyTorch.") from exc
 
 try:
-    from transformers import GPT2Config, GPT2LMHeadModel
+    from transformers import LlamaConfig, LlamaForCausalLM
 except ImportError:  # pragma: no cover - transformers is optional
-    GPT2Config = None  # type: ignore[assignment]
-    GPT2LMHeadModel = None  # type: ignore[assignment]
+    LlamaConfig = None  # type: ignore[assignment]
+    LlamaForCausalLM = None  # type: ignore[assignment]
 
 
 def _require_transformers() -> None:
-    if GPT2Config is None or GPT2LMHeadModel is None:
+    if LlamaConfig is None or LlamaForCausalLM is None:
         raise ImportError(
             "facialgen.models requires the Hugging Face transformers package. "
             "Install it with `pip install transformers` in your project environment."
@@ -27,7 +27,7 @@ def _require_transformers() -> None:
 def _sanitize_hf_config_loss_type(hf_config: Any) -> Any:
     """
     Remove any generic `loss_type` attribute so this wrapper always uses the
-    standard causal LM loss path chosen by GPT-2 itself.
+    standard causal LM loss path chosen by the underlying HF model itself.
     """
     if hasattr(hf_config, "loss_type"):
         delattr(hf_config, "loss_type")
@@ -52,34 +52,30 @@ class FacialGenConfig:
 
     def to_hf_config(self) -> Any:
         _require_transformers()
-        hf_config = GPT2Config(
+        hf_config = LlamaConfig(
             vocab_size=self.vocab_size,
-            n_positions=self.block_size,
-            n_ctx=self.block_size,
-            n_layer=self.n_layer,
-            n_head=self.n_head,
-            n_embd=self.n_embd,
-            resid_pdrop=(
-                self.resid_dropout if self.resid_dropout is not None else self.dropout
-            ),
-            embd_pdrop=(
-                self.embd_dropout if self.embd_dropout is not None else self.dropout
-            ),
-            attn_pdrop=(
+            hidden_size=self.n_embd,
+            intermediate_size=4 * self.n_embd,
+            num_hidden_layers=self.n_layer,
+            num_attention_heads=self.n_head,
+            num_key_value_heads=self.n_head,
+            max_position_embeddings=self.block_size,
+            rms_norm_eps=self.layer_norm_epsilon,
+            attention_dropout=(
                 self.attn_dropout if self.attn_dropout is not None else self.dropout
             ),
-            layer_norm_epsilon=self.layer_norm_epsilon,
             bos_token_id=self.bos_token_id,
             eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             use_cache=True,
+            tie_word_embeddings=False,
         )
         return _sanitize_hf_config_loss_type(hf_config)
 
 
 class FacialGen(nn.Module):
     """
-    Thin wrapper around Hugging Face GPT2LMHeadModel for facial-walk token modeling.
+    Thin wrapper around Hugging Face LlamaForCausalLM for facial-walk token modeling.
 
     The model expects the same batch format as the current dataloader:
     `input_ids`, `attention_mask`, and `labels` with pad positions set to `-100`.
@@ -90,7 +86,7 @@ class FacialGen(nn.Module):
         _require_transformers()
         self.config = config
         self.hf_config = config.to_hf_config()
-        self.model = GPT2LMHeadModel(self.hf_config)
+        self.model = LlamaForCausalLM(self.hf_config)
         self.model.config = _sanitize_hf_config_loss_type(self.model.config)
         self.hf_config = self.model.config
 
@@ -144,20 +140,20 @@ class FacialGen(nn.Module):
         _require_transformers()
         model = cls.__new__(cls)
         nn.Module.__init__(model)
-        hf_model = GPT2LMHeadModel.from_pretrained(pretrained_model_name_or_path)
+        hf_model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path)
         hf_config = _sanitize_hf_config_loss_type(hf_model.config)
         hf_model.config = hf_config
         model.config = FacialGenConfig(
             vocab_size=hf_config.vocab_size,
-            block_size=hf_config.n_positions,
-            n_layer=hf_config.n_layer,
-            n_head=hf_config.n_head,
-            n_embd=hf_config.n_embd,
-            dropout=hf_config.resid_pdrop,
-            embd_dropout=hf_config.embd_pdrop,
-            attn_dropout=hf_config.attn_pdrop,
-            resid_dropout=hf_config.resid_pdrop,
-            layer_norm_epsilon=hf_config.layer_norm_epsilon,
+            block_size=hf_config.max_position_embeddings,
+            n_layer=hf_config.num_hidden_layers,
+            n_head=hf_config.num_attention_heads,
+            n_embd=hf_config.hidden_size,
+            dropout=float(getattr(hf_config, "attention_dropout", 0.0)),
+            embd_dropout=None,
+            attn_dropout=float(getattr(hf_config, "attention_dropout", 0.0)),
+            resid_dropout=None,
+            layer_norm_epsilon=hf_config.rms_norm_eps,
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             pad_token_id=hf_config.pad_token_id,
