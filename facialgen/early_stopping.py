@@ -176,10 +176,38 @@ def average_precision_from_edge_scores(
     scores = np.concatenate((pos_scores, neg_scores))
     order = np.argsort(-scores, kind="stable")
     y_sorted = y_true[order]
+    scores_sorted = scores[order]
 
-    tp = np.cumsum(y_sorted)
-    precision = tp / np.arange(1, y_sorted.size + 1)
-    return float((precision * y_sorted).sum() / pos_scores.size)
+    # Group tied scores so AP is not artificially inflated by the original
+    # positive-first concatenation order.
+    total_pos = float(pos_scores.size)
+    tp = 0.0
+    fp = 0.0
+    prev_recall = 0.0
+    ap = 0.0
+
+    idx = 0
+    while idx < y_sorted.size:
+        score = scores_sorted[idx]
+        j = idx
+        block_tp = 0.0
+        block_fp = 0.0
+        while j < y_sorted.size and scores_sorted[j] == score:
+            if y_sorted[j] == 1:
+                block_tp += 1.0
+            else:
+                block_fp += 1.0
+            j += 1
+
+        tp += block_tp
+        fp += block_fp
+        recall = tp / total_pos
+        precision = tp / max(tp + fp, 1.0)
+        ap += (recall - prev_recall) * precision
+        prev_recall = recall
+        idx = j
+
+    return float(ap)
 
 
 def link_prediction_scores_from_transition_matrix(
