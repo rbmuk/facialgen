@@ -256,10 +256,12 @@ def sample_model_walks(
     progress_desc: str = "sampling walks",
 ) -> list[list[int]]:
     """
-    Sample token sequences from a causal language model for evaluation.
+    Sample token sequences with constrained facial-walk decoding.
 
-    The model is expected to expose `generate(...)` and to emit token ids in the
-    same vocabulary used by the dataset.
+    The faithful facial-walk encoding alternates model-chosen vertex tokens with
+    deterministic copied vertices that preserve the dart structure. This decoder
+    only samples at the model-chosen positions, inserts the copied vertices
+    itself, and only accepts `EOS` at valid face-closure positions.
     """
     import torch
     from tqdm.auto import tqdm
@@ -268,6 +270,17 @@ def sample_model_walks(
     walks: list[list[int]] = []
     remaining = int(num_samples)
     total_batches = (remaining + batch_size - 1) // batch_size
+    hf_config = getattr(model, "hf_config", None)
+    model_block_size = int(
+        getattr(getattr(model, "config", None), "block_size", 0)
+        or getattr(hf_config, "max_position_embeddings", 0)
+        or max_length
+    )
+    pad_token_id = int(
+        getattr(getattr(model, "config", None), "pad_token_id", -1)
+        if getattr(getattr(model, "config", None), "pad_token_id", None) is not None
+        else getattr(hf_config, "pad_token_id", bos_token_id)
+    )
     pbar = tqdm(
         total=total_batches,
         desc=progress_desc,
@@ -276,23 +289,108 @@ def sample_model_walks(
 
     while remaining > 0:
         cur_batch = min(batch_size, remaining)
-        prompt = torch.full(
-            (cur_batch, 1),
-            fill_value=bos_token_id,
-            dtype=torch.long,
-            device=device,
-        )
-        generated = model.generate(
-            prompt,
-            max_new_tokens=max_length - 1,
-        )
-        generated = generated.detach().cpu().numpy()
+        sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(cur_batch)]
+        sampled_vertices: list[list[int]] = [[] for _ in range(cur_batch)]
+        pending_copy = np.zeros(cur_batch, dtype=bool)
+        finished = np.zeros(cur_batch, dtype=bool)
 
-        for row in generated:
-            seq = row.tolist()
-            if eos_token_id is not None and eos_token_id in seq:
-                seq = seq[: seq.index(eos_token_id) + 1]
-            walks.append(seq)
+        while not np.all(finished):
+            progressed = False
+
+            for row_idx in range(cur_batch):
+                if finished[row_idx] or not pending_copy[row_idx]:
+                    continue
+                verts = sampled_vertices[row_idx]
+                copied = verts[0] if len(verts) == 3 else verts[-2]
+                if len(sequences[row_idx]) >= max_length:
+                    finished[row_idx] = True
+                    continue
+                sequences[row_idx].append(int(copied))
+                pending_copy[row_idx] = False
+                progressed = True
+                if len(sequences[row_idx]) >= max_length:
+                    finished[row_idx] = True
+
+            need_model_rows = [
+                row_idx for row_idx in range(cur_batch)
+                if not finished[row_idx] and not pending_copy[row_idx]
+            ]
+            if not need_model_rows:
+                if not progressed:
+                    break
+                continue
+
+            prompt_lengths = [
+                min(len(sequences[row_idx]), model_block_size)
+                for row_idx in need_model_rows
+            ]
+            prompt_max_len = max(prompt_lengths)
+            input_ids = torch.full(
+                (len(need_model_rows), prompt_max_len),
+                fill_value=pad_token_id,
+                dtype=torch.long,
+                device=device,
+            )
+            attention_mask = torch.zeros(
+                (len(need_model_rows), prompt_max_len),
+                dtype=torch.bool,
+                device=device,
+            )
+            for batch_row, row_idx in enumerate(need_model_rows):
+                prompt = sequences[row_idx][-model_block_size:]
+                prompt_tensor = torch.tensor(prompt, dtype=torch.long, device=device)
+                input_ids[batch_row, : prompt_tensor.numel()] = prompt_tensor
+                attention_mask[batch_row, : prompt_tensor.numel()] = True
+
+            outputs = model(
+                input_ids,
+                attention_mask=attention_mask,
+                labels=None,
+            )
+            logits = outputs["logits"]
+            next_token_logits = logits[torch.arange(len(need_model_rows), device=device), torch.tensor(prompt_lengths, device=device) - 1]
+            masked_logits = next_token_logits.clone()
+
+            # Only vertices are valid ordinary samples. EOS is allowed only when
+            # the current faithful sequence is at a complete-face boundary.
+            masked_logits[:, bos_token_id:] = -float("inf")
+            if eos_token_id is not None:
+                eos_column = next_token_logits[:, eos_token_id].clone()
+                eos_allowed = torch.tensor(
+                    [
+                        (len(sampled_vertices[row_idx]) >= 2)
+                        and (len(sampled_vertices[row_idx]) % 2 == 0)
+                        for row_idx in need_model_rows
+                    ],
+                    dtype=torch.bool,
+                    device=device,
+                )
+                masked_logits[:, eos_token_id] = torch.where(
+                    eos_allowed,
+                    eos_column,
+                    torch.full_like(eos_column, -float("inf")),
+                )
+            probs = torch.softmax(masked_logits, dim=-1)
+            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1).tolist()
+
+            for batch_row, row_idx in enumerate(need_model_rows):
+                token = int(next_tokens[batch_row])
+                sequences[row_idx].append(token)
+                progressed = True
+                if eos_token_id is not None and token == int(eos_token_id):
+                    finished[row_idx] = True
+                    continue
+
+                sampled_vertices[row_idx].append(token)
+                if len(sampled_vertices[row_idx]) >= 3:
+                    pending_copy[row_idx] = True
+                if len(sequences[row_idx]) >= max_length:
+                    finished[row_idx] = True
+
+            if not progressed:
+                break
+
+        walks.extend(sequences)
 
         remaining -= cur_batch
         pbar.update(1)
