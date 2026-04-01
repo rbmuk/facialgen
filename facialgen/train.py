@@ -70,6 +70,12 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-max-length", type=int, default=None)
+    parser.add_argument(
+        "--eval-start-mode",
+        type=str,
+        choices=["bos", "random_vertex"],
+        default="bos",
+    )
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
     parser.add_argument("--use-link-prediction-split", action="store_true")
     return parser
@@ -378,6 +384,9 @@ def train_model(
                 bos_token_id=int(eval_info["bos_token_id"]),
                 eos_token_id=int(eval_info["eos_token_id"]),
                 device=device,
+                start_mode=args.eval_start_mode,
+                num_nodes=int(eval_info["num_nodes"]),
+                rng_seed=int(args.seed) + epoch if hasattr(args, "seed") else epoch,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
