@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import random
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +16,7 @@ from .curvature import largest_connected_component, resistance_curvature
 from .data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
-    load_coraml_sparse,
+    load_graph_dataset_sparse,
     make_face_chunk_dataloader,
 )
 from .early_stopping import (
@@ -29,11 +31,18 @@ from .models import FacialGen, FacialGenConfig
 
 
 def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="coraml",
+        choices=["coraml", "cora_ml", "citeseer", "polblogs"],
+    )
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--num-sign-configs", type=int, default=8)
     parser.add_argument("--sign-seed", type=int, default=2026)
     parser.add_argument("--epoch-seed", type=int, default=99)
     parser.add_argument("--context-size", type=int, default=32)
+    parser.add_argument("--stride", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -46,6 +55,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--n-embd", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--save-dir", type=str, default=None)
+    parser.add_argument("--resume-from-latest", action="store_true")
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument(
         "--early-stop-mode",
@@ -83,13 +93,25 @@ def resolve_device(device_arg: str) -> torch.device:
     return torch.device("cpu")
 
 
+def seed_everything(seed: int) -> None:
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def build_training_objects(args: argparse.Namespace) -> tuple[
     CyclicFaceChunkDataset,
     torch.utils.data.DataLoader,
     FacialGen,
     dict[str, object],
 ]:
-    A_full, X, y = load_coraml_sparse(data_dir=args.data_dir)
+    A_full, X, y = load_graph_dataset_sparse(
+        args.dataset_name,
+        data_dir=args.data_dir,
+    )
     A_lcc, nodes_lcc = largest_connected_component(A_full)
     n_lcc = A_lcc.shape[0]
     ref_num_edges = int(sp.triu(A_lcc, k=1).nnz)
@@ -132,6 +154,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     chunk_ds = CyclicFaceChunkDataset(
         face_ds,
         context_size=args.context_size,
+        stride=args.stride,
         epoch_seed=args.epoch_seed,
     )
     loader = make_face_chunk_dataloader(
@@ -156,9 +179,11 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         )
     )
 
-    print(f"CoraML LCC nodes: {n_lcc}")
+    print(f"Dataset: {args.dataset_name}")
+    print(f"LCC nodes: {n_lcc}")
     print(f"Full face sequences: {len(face_ds)}")
     print(f"Chunk samples @ T={args.context_size}: {len(chunk_ds)}")
+    print(f"Chunk stride: {chunk_ds.stride}")
     print(
         f"Vocab: {face_ds.vocab_size + 1} "
         f"(vertices + BOS + EOS + PAD)"
@@ -195,9 +220,66 @@ def maybe_save_checkpoint(
     torch.save(optimizer.state_dict(), out_dir / f"optimizer_epoch_{epoch:03d}.pt")
 
 
+def maybe_resume_training(
+    model: FacialGen,
+    optimizer: AdamW,
+    save_dir: str | None,
+    resume_from_latest: bool,
+    device: torch.device,
+) -> int:
+    if save_dir is None or not resume_from_latest:
+        return 0
+
+    out_dir = Path(save_dir)
+    if not out_dir.exists():
+        return 0
+
+    epoch_dirs = sorted(out_dir.glob("epoch_*"))
+    if not epoch_dirs:
+        return 0
+
+    latest_dir = epoch_dirs[-1]
+    try:
+        latest_epoch = int(latest_dir.name.split("_")[-1])
+    except ValueError:
+        return 0
+
+    optimizer_path = out_dir / f"optimizer_epoch_{latest_epoch:03d}.pt"
+    if not optimizer_path.exists():
+        return 0
+
+    resumed_model = FacialGen.from_pretrained(str(latest_dir))
+    model.load_state_dict(resumed_model.state_dict())
+    optimizer.load_state_dict(torch.load(optimizer_path, map_location=device))
+    print(f"Resuming from checkpoint: {latest_dir}")
+    return latest_epoch
+
+
+def save_final_training_artifacts(
+    model: FacialGen,
+    history: list[dict[str, float]],
+    args: argparse.Namespace,
+    save_dir: str | None,
+) -> None:
+    if save_dir is None:
+        return
+
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    final_dir = out_dir / "final"
+    model.save_pretrained(str(final_dir))
+    (out_dir / "history.json").write_text(json.dumps(history, indent=2))
+    (out_dir / "train_args.json").write_text(
+        json.dumps(vars(args), indent=2, sort_keys=True)
+    )
+
+
 def train_model(
     args: argparse.Namespace,
 ) -> tuple[FacialGen, dict[str, object], list[dict[str, float]]]:
+    if hasattr(args, "seed") and args.seed is not None:
+        seed_everything(args.seed)
     device = resolve_device(args.device)
     chunk_ds, loader, model, eval_info = build_training_objects(args)
     model.to(device)
@@ -206,6 +288,13 @@ def train_model(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
+    )
+    start_epoch = maybe_resume_training(
+        model,
+        optimizer,
+        args.save_dir,
+        getattr(args, "resume_from_latest", False),
+        device,
     )
 
     print(f"Training on device: {device}")
@@ -227,7 +316,7 @@ def train_model(
     )
     history: list[dict[str, float]] = []
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         chunk_ds.set_epoch(epoch)
 
@@ -289,6 +378,8 @@ def train_model(
                 bos_token_id=int(eval_info["bos_token_id"]),
                 eos_token_id=int(eval_info["eos_token_id"]),
                 device=device,
+                show_progress=True,
+                progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
 
             if args.early_stop_mode == "val":
@@ -351,6 +442,7 @@ def train_model(
 
         maybe_save_checkpoint(model, optimizer, epoch + 1, args.save_dir)
 
+    save_final_training_artifacts(model, history, args, args.save_dir)
     return model, eval_info, history
 
 

@@ -224,6 +224,8 @@ def sample_model_walks(
     eos_token_id: int | None,
     device,
     batch_size: int = 128,
+    show_progress: bool = False,
+    progress_desc: str = "sampling walks",
 ) -> list[list[int]]:
     """
     Sample token sequences from a causal language model for evaluation.
@@ -232,10 +234,17 @@ def sample_model_walks(
     same vocabulary used by the dataset.
     """
     import torch
+    from tqdm.auto import tqdm
 
     model.eval()
     walks: list[list[int]] = []
     remaining = int(num_samples)
+    total_batches = (remaining + batch_size - 1) // batch_size
+    pbar = tqdm(
+        total=total_batches,
+        desc=progress_desc,
+        disable=not show_progress,
+    )
 
     while remaining > 0:
         cur_batch = min(batch_size, remaining)
@@ -258,7 +267,9 @@ def sample_model_walks(
             walks.append(seq)
 
         remaining -= cur_batch
+        pbar.update(1)
 
+    pbar.close()
     return walks
 
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from collections import Counter
 
 import numpy as np
 import scipy.sparse as sp
@@ -61,29 +60,60 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
             num_sign_configs=2,
             sign_seed=11,
         )
-        chunk_ds = CyclicFaceChunkDataset(face_ds, context_size=5, epoch_seed=19)
+        chunk_ds = CyclicFaceChunkDataset(
+            face_ds,
+            context_size=5,
+            stride=2,
+            epoch_seed=19,
+        )
 
         face_idx = 0
         original = face_ds.sequences[face_idx]
         self.assertGreater(len(original), 3)
 
-        def collect_chunks(epoch: int) -> np.ndarray:
+        def collect_chunks(epoch: int) -> list[dict[str, object]]:
             chunk_ds.set_epoch(epoch)
             pieces = []
-            for idx, (mapped_face_idx, _) in enumerate(chunk_ds.chunk_to_face):
+            for idx, (mapped_face_idx, _, _) in enumerate(chunk_ds.chunk_to_face):
                 if mapped_face_idx == face_idx:
-                    pieces.append(chunk_ds[idx]["tokens"].numpy())
-            return np.concatenate(pieces)
+                    item = chunk_ds[idx]
+                    pieces.append(
+                        {
+                            "tokens": item["tokens"].numpy(),
+                            "chunk_start": int(item["chunk_start"]),
+                        }
+                    )
+            return pieces
 
-        seq_e0 = collect_chunks(0)
-        seq_e1 = collect_chunks(1)
+        chunks_e0 = collect_chunks(0)
+        chunks_e1 = collect_chunks(1)
+        seq_e0 = chunks_e0[0]["tokens"]
+        seq_e1 = chunks_e1[0]["tokens"]
 
         self.assertEqual(seq_e0[0], face_ds.bos_token_id)
-        self.assertEqual(seq_e0[-1], face_ds.eos_token_id)
-        self.assertEqual(len(seq_e0), len(original))
-        self.assertEqual(len(seq_e1), len(original))
-        self.assertEqual(Counter(seq_e0[1:-1].tolist()), Counter(original[1:-1].tolist()))
-        self.assertEqual(Counter(seq_e1[1:-1].tolist()), Counter(original[1:-1].tolist()))
+        self.assertEqual(chunks_e0[-1]["tokens"][-1], face_ds.eos_token_id)
+        self.assertEqual(chunks_e0[0]["chunk_start"], 0)
+        self.assertEqual(chunks_e1[0]["chunk_start"], 0)
+        self.assertGreater(len(chunks_e0), 1)
+        self.assertEqual(chunks_e0[1]["chunk_start"] - chunks_e0[0]["chunk_start"], 2)
+        overlap = 5 - 2
+        self.assertTrue(
+            np.array_equal(
+                chunks_e0[0]["tokens"][-overlap:],
+                chunks_e0[1]["tokens"][:overlap],
+            )
+        )
+        self.assertEqual(chunks_e0[-1]["chunk_start"] + len(chunks_e0[-1]["tokens"]), len(original))
+        covered_e0 = set()
+        covered_e1 = set()
+        for item in chunks_e0:
+            start = item["chunk_start"]
+            covered_e0.update(range(start, start + len(item["tokens"])))
+        for item in chunks_e1:
+            start = item["chunk_start"]
+            covered_e1.update(range(start, start + len(item["tokens"])))
+        self.assertEqual(covered_e0, set(range(len(original))))
+        self.assertEqual(covered_e1, set(range(len(original))))
         self.assertFalse(np.array_equal(seq_e0, seq_e1))
 
 

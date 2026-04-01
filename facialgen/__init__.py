@@ -14,7 +14,7 @@ from .data import (
     FaceChunkCollator,
     FacialWalkVertexDataset,
     build_face_vertex_sequences,
-    load_coraml_sparse,
+    load_graph_dataset_sparse,
     make_face_chunk_dataloader,
 )
 from .early_stopping import (
@@ -57,9 +57,10 @@ from .rotation_systems import (
     list_all_darts_from_rotation,
     random_rotation_system,
 )
+from .train import resolve_device, seed_everything, train_model
 
 __all__ = [
-    "load_coraml_sparse",
+    "load_graph_dataset_sparse",
     "build_face_vertex_sequences",
     "FacialWalkVertexDataset",
     "CyclicFaceChunkDataset",
@@ -87,6 +88,9 @@ __all__ = [
     "average_rank_from_graph_statistics",
     "FacialGenConfig",
     "FacialGen",
+    "resolve_device",
+    "seed_everything",
+    "train_model",
     "largest_connected_component",
     "distance_matrix_from_adjacency",
     "steinerberger_curvature_from_distance",

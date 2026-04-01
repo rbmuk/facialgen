@@ -22,47 +22,52 @@ except ImportError:  # pragma: no cover - torch is optional for this package
 
     class Dataset:  # type: ignore[no-redef]
         pass
-
-
-def load_coraml_sparse(
+def load_graph_dataset_sparse(
+    dataset_name: str,
     *,
     data_dir: str | Path = "data",
     pyg_root: str | Path | None = None,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
     """
-    Load CoraML as sparse matrices using PyTorch Geometric only.
+    Load one of the supported graph datasets as sparse matrices.
 
-    Parameters
-    ----------
-    data_dir : str or Path, default="data"
-        Base directory used for local dataset cache.
-    pyg_root : str or Path or None, default=None
-        Root directory for PyG dataset cache. If None, uses data_dir/pyg.
-
-    Returns
-    -------
-    A : sp.csr_matrix
-        Sparse adjacency matrix of shape (n, n).
-    X : sp.csr_matrix
-        Sparse node feature matrix of shape (n, d).
-    y : np.ndarray
-        Integer class labels of shape (n,).
-
-    Raises
-    ------
-    ImportError
-        If torch_geometric is not installed.
+    Supported names:
+    - `coraml`, `cora_ml`
+    - `citeseer`
+    - `polblogs`
     """
+    dataset_key = dataset_name.strip().lower().replace("-", "_")
+
     try:
         datasets_mod = importlib.import_module("torch_geometric.datasets")
-        CitationFull = getattr(datasets_mod, "CitationFull")
     except ImportError as exc:
         raise ImportError(
-            "load_coraml_sparse requires torch_geometric. Install PyG to use this loader."
+            "load_graph_dataset_sparse requires torch_geometric. Install PyG to use this loader."
         ) from exc
 
     root = Path(pyg_root) if pyg_root is not None else Path(data_dir) / "pyg"
-    dataset = CitationFull(root=str(root), name="cora_ml")
+
+    try:
+        if dataset_key in {"coraml", "cora_ml"}:
+            CitationFull = getattr(datasets_mod, "CitationFull")
+            dataset = CitationFull(root=str(root), name="cora_ml")
+        elif dataset_key == "citeseer":
+            Planetoid = getattr(datasets_mod, "Planetoid")
+            dataset = Planetoid(root=str(root), name="Citeseer")
+        elif dataset_key == "polblogs":
+            PolBlogs = getattr(datasets_mod, "PolBlogs")
+            dataset = PolBlogs(root=str(root))
+        else:
+            raise ValueError(
+                f"Unsupported dataset_name={dataset_name!r}. "
+                "Supported values are: coraml, citeseer, polblogs."
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load dataset {dataset_name!r}. If it is not already cached "
+            f"locally under {root}, PyG may be trying to download it."
+        ) from exc
+
     data = dataset[0]
 
     num_nodes = int(data.num_nodes)
@@ -76,13 +81,21 @@ def load_coraml_sparse(
     A.data[:] = 1.0
     A.eliminate_zeros()
 
-    x = data.x
-    if getattr(x, "is_sparse", False):
-        x = x.to_dense()
-    X = sp.csr_matrix(x.cpu().numpy())
+    x = getattr(data, "x", None)
+    if x is None:
+        X = sp.eye(num_nodes, format="csr", dtype=np.float64)
+    else:
+        if getattr(x, "is_sparse", False):
+            x = x.to_dense()
+        X = sp.csr_matrix(x.cpu().numpy())
 
-    y = data.y.cpu().numpy()
-    return A, X, y
+    y = getattr(data, "y", None)
+    if y is None:
+        y_arr = np.full(num_nodes, -1, dtype=np.int64)
+    else:
+        y_arr = y.cpu().numpy()
+
+    return A, X, y_arr
 
 
 def _require_torch() -> None:
@@ -97,6 +110,13 @@ def _validate_context_size(context_size: int) -> int:
     if context_size <= 0:
         raise ValueError("context_size must be positive.")
     return context_size
+
+
+def _validate_stride(stride: int) -> int:
+    stride = int(stride)
+    if stride <= 0:
+        raise ValueError("stride must be positive.")
+    return stride
 
 
 def _sample_sign_configurations(
@@ -125,8 +145,19 @@ def _rotate_cycle(vertices: np.ndarray, offset: int) -> np.ndarray:
     return np.concatenate((vertices[offset:], vertices[:offset]))
 
 
-def _num_chunks(sequence_length: int, context_size: int) -> int:
-    return max(1, math.ceil(sequence_length / context_size))
+def _window_starts(
+    sequence_length: int,
+    context_size: int,
+    stride: int,
+) -> list[int]:
+    if sequence_length <= context_size:
+        return [0]
+
+    starts = list(range(0, sequence_length - context_size + 1, stride))
+    tail_start = sequence_length - context_size
+    if starts[-1] != tail_start:
+        starts.append(tail_start)
+    return starts
 
 
 def build_face_vertex_sequences(
@@ -269,7 +300,7 @@ class CyclicFaceChunkDataset(Dataset):
 
         [BOS] v'_0 v'_1 ... v'_k [EOS]
 
-    is then partitioned into contiguous chunks of length at most `context_size`.
+    is then partitioned into overlapping windows of length at most `context_size`.
     """
 
     def __init__(
@@ -277,6 +308,7 @@ class CyclicFaceChunkDataset(Dataset):
         face_dataset: FacialWalkVertexDataset,
         *,
         context_size: int,
+        stride: int | None = None,
         epoch_seed: int = 0,
         pad_token_id: int | None = None,
     ) -> None:
@@ -284,20 +316,23 @@ class CyclicFaceChunkDataset(Dataset):
 
         self.face_dataset = face_dataset
         self.context_size = _validate_context_size(context_size)
+        self.stride = _validate_stride(
+            self.context_size // 2 if stride is None else stride
+        )
         self.epoch_seed = int(epoch_seed)
         self.epoch = 0
         self.pad_token_id = (
             face_dataset.vocab_size if pad_token_id is None else int(pad_token_id)
         )
 
-        self.chunk_to_face: list[tuple[int, int]] = []
+        self.chunk_to_face: list[tuple[int, int, int]] = []
         self.num_chunks_per_face = np.empty(len(face_dataset), dtype=np.int64)
 
         for face_idx, seq in enumerate(face_dataset.sequences):
-            n_chunks = _num_chunks(len(seq), self.context_size)
-            self.num_chunks_per_face[face_idx] = n_chunks
-            for chunk_idx in range(n_chunks):
-                self.chunk_to_face.append((face_idx, chunk_idx))
+            starts = _window_starts(len(seq), self.context_size, self.stride)
+            self.num_chunks_per_face[face_idx] = len(starts)
+            for chunk_idx, start in enumerate(starts):
+                self.chunk_to_face.append((face_idx, chunk_idx, start))
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
@@ -332,10 +367,9 @@ class CyclicFaceChunkDataset(Dataset):
         return rotated
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        face_idx, chunk_idx = self.chunk_to_face[idx]
+        face_idx, chunk_idx, start = self.chunk_to_face[idx]
         rotated = self._rotated_full_sequence(face_idx)
 
-        start = chunk_idx * self.context_size
         stop = min(start + self.context_size, len(rotated))
         chunk = rotated[start:stop]
 
@@ -343,11 +377,13 @@ class CyclicFaceChunkDataset(Dataset):
             "tokens": torch.as_tensor(chunk, dtype=torch.long),
             "face_index": int(face_idx),
             "chunk_index": int(chunk_idx),
+            "chunk_start": int(start),
             "num_chunks_for_face": int(self.num_chunks_per_face[face_idx]),
             "sign_config_index": int(self.face_dataset.sign_config_index[face_idx]),
             "face_index_within_config": int(
                 self.face_dataset.face_index_within_config[face_idx]
             ),
+            "stride": int(self.stride),
         }
 
 
@@ -395,6 +431,10 @@ class FaceChunkCollator:
             ),
             "chunk_index": torch.tensor(
                 [item["chunk_index"] for item in batch],
+                dtype=torch.long,
+            ),
+            "chunk_start": torch.tensor(
+                [item["chunk_start"] for item in batch],
                 dtype=torch.long,
             ),
             "num_chunks_for_face": torch.tensor(
