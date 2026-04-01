@@ -296,6 +296,7 @@ def train_model(
 ) -> tuple[FacialGen, dict[str, object], list[dict[str, float]]]:
     if hasattr(args, "seed") and args.seed is not None:
         seed_everything(args.seed)
+    vertex_context_size = _vertex_context_size_from_args(args)
     device = resolve_device(args.device)
     chunk_ds, loader, model, eval_info = build_training_objects(args)
     model.to(device)
