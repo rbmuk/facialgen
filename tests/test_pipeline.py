@@ -34,7 +34,7 @@ def toy_graph() -> tuple[sp.csr_matrix, np.ndarray]:
 
 
 class FacialWalkDatasetSmokeTests(unittest.TestCase):
-    def test_full_face_sequences_have_boundary_tokens(self) -> None:
+    def test_full_face_sequences_are_boundary_free(self) -> None:
         A, curvature = toy_graph()
         face_ds = FacialWalkVertexDataset(
             A,
@@ -46,9 +46,9 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         self.assertGreater(len(face_ds), 0)
         sample = face_ds[0]
 
-        self.assertEqual(int(sample["tokens"][0]), face_ds.bos_token_id)
-        self.assertEqual(int(sample["tokens"][-1]), face_ds.eos_token_id)
         self.assertEqual(sample["sequence_length"], int(sample["tokens"].numel()))
+        self.assertTrue(np.all(sample["tokens"].numpy() < face_ds.num_nodes))
+        self.assertNotIn(face_ds.bos_token_id, sample["tokens"].tolist())
         self.assertIn(sample["sign_config_index"], range(3))
         self.assertGreaterEqual(sample["face_index_within_config"], 0)
 
@@ -62,14 +62,14 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         )
         chunk_ds = CyclicFaceChunkDataset(
             face_ds,
-            context_size=5,
-            stride=2,
+            vertex_context_size=5,
+            dart_stride=1,
             epoch_seed=19,
         )
 
         face_idx = 0
-        original = face_ds.sequences[face_idx]
-        self.assertGreater(len(original), 3)
+        original_darts = face_ds.dart_faces[face_idx]
+        self.assertGreater(len(original_darts), 2)
 
         def collect_chunks(epoch: int) -> list[dict[str, object]]:
             chunk_ds.set_epoch(epoch)
@@ -81,6 +81,7 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
                         {
                             "tokens": item["tokens"].numpy(),
                             "chunk_start": int(item["chunk_start"]),
+                            "dart_length": int(item["dart_length"]),
                         }
                     )
             return pieces
@@ -91,30 +92,96 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         seq_e1 = chunks_e1[0]["tokens"]
 
         self.assertEqual(seq_e0[0], face_ds.bos_token_id)
-        self.assertEqual(chunks_e0[-1]["tokens"][-1], face_ds.eos_token_id)
+        self.assertEqual(seq_e1[0], face_ds.bos_token_id)
         self.assertEqual(chunks_e0[0]["chunk_start"], 0)
         self.assertEqual(chunks_e1[0]["chunk_start"], 0)
         self.assertGreater(len(chunks_e0), 1)
-        self.assertEqual(chunks_e0[1]["chunk_start"] - chunks_e0[0]["chunk_start"], 2)
-        overlap = 5 - 2
-        self.assertTrue(
-            np.array_equal(
-                chunks_e0[0]["tokens"][-overlap:],
-                chunks_e0[1]["tokens"][:overlap],
-            )
+        self.assertEqual(chunks_e0[1]["chunk_start"] - chunks_e0[0]["chunk_start"], 1)
+        self.assertLessEqual(len(chunks_e0[0]["tokens"]), 5)
+        self.assertEqual(chunks_e0[0]["dart_length"], 2)
+        self.assertEqual(
+            chunks_e0[-1]["chunk_start"] + chunks_e0[-1]["dart_length"],
+            len(original_darts),
         )
-        self.assertEqual(chunks_e0[-1]["chunk_start"] + len(chunks_e0[-1]["tokens"]), len(original))
+        self.assertNotIn(face_ds.eos_token_id, chunks_e0[0]["tokens"].tolist())
+        self.assertNotIn(face_ds.eos_token_id, chunks_e0[-1]["tokens"].tolist())
         covered_e0 = set()
         covered_e1 = set()
         for item in chunks_e0:
             start = item["chunk_start"]
-            covered_e0.update(range(start, start + len(item["tokens"])))
+            covered_e0.update(range(start, start + item["dart_length"]))
         for item in chunks_e1:
             start = item["chunk_start"]
-            covered_e1.update(range(start, start + len(item["tokens"])))
-        self.assertEqual(covered_e0, set(range(len(original))))
-        self.assertEqual(covered_e1, set(range(len(original))))
+            covered_e1.update(range(start, start + item["dart_length"]))
+        self.assertEqual(covered_e0, set(range(len(original_darts))))
+        self.assertEqual(covered_e1, set(range(len(original_darts))))
         self.assertFalse(np.array_equal(seq_e0, seq_e1))
+
+    def test_chunk_tokens_match_rotated_dart_windows(self) -> None:
+        A, curvature = toy_graph()
+        face_ds = FacialWalkVertexDataset(
+            A,
+            curvature,
+            num_sign_configs=1,
+            sign_seed=5,
+        )
+        chunk_ds = CyclicFaceChunkDataset(
+            face_ds,
+            vertex_context_size=7,
+            dart_stride=2,
+            epoch_seed=13,
+        )
+
+        face_idx = 0
+        chunk_ds.set_epoch(0)
+        rotated_darts = chunk_ds._rotated_dart_face(face_idx)
+        bos = face_ds.bos_token_id
+
+        matching_indices = [
+            idx
+            for idx, (mapped_face_idx, _, _) in enumerate(chunk_ds.chunk_to_face)
+            if mapped_face_idx == face_idx
+        ]
+        self.assertGreater(len(matching_indices), 0)
+
+        for idx in matching_indices:
+            item = chunk_ds[idx]
+            start = int(item["chunk_start"])
+            dart_length = int(item["dart_length"])
+            expected = [bos]
+            for u, v in rotated_darts[start:start + dart_length]:
+                expected.extend([u, v])
+            if bool(item["has_eos"]):
+                expected.append(face_ds.eos_token_id)
+            self.assertEqual(item["tokens"].tolist(), expected)
+            self.assertLessEqual(len(expected), chunk_ds.vertex_context_size)
+
+    def test_short_faces_can_emit_eos(self) -> None:
+        A, curvature = toy_graph()
+        face_ds = FacialWalkVertexDataset(
+            A,
+            curvature,
+            num_sign_configs=1,
+            sign_seed=17,
+        )
+        chunk_ds = CyclicFaceChunkDataset(
+            face_ds,
+            vertex_context_size=32,
+            dart_stride=15,
+            epoch_seed=23,
+        )
+
+        found_short_face = False
+        for idx in range(len(chunk_ds)):
+            item = chunk_ds[idx]
+            face_idx = int(item["face_index"])
+            if len(face_ds.dart_faces[face_idx]) <= chunk_ds.max_darts_per_chunk:
+                found_short_face = True
+                self.assertTrue(bool(item["has_eos"]))
+                self.assertEqual(item["tokens"][-1].item(), face_ds.eos_token_id)
+                break
+
+        self.assertTrue(found_short_face)
 
 
 class EvaluationSmokeTests(unittest.TestCase):

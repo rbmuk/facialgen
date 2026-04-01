@@ -252,9 +252,6 @@ def sample_model_walks(
     eos_token_id: int | None,
     device,
     batch_size: int = 128,
-    start_mode: str = "bos",
-    num_nodes: int | None = None,
-    rng_seed: int | None = None,
     show_progress: bool = False,
     progress_desc: str = "sampling walks",
 ) -> list[list[int]]:
@@ -268,7 +265,6 @@ def sample_model_walks(
     from tqdm.auto import tqdm
 
     model.eval()
-    rng = np.random.default_rng(rng_seed)
     walks: list[list[int]] = []
     remaining = int(num_samples)
     total_batches = (remaining + batch_size - 1) // batch_size
@@ -280,28 +276,12 @@ def sample_model_walks(
 
     while remaining > 0:
         cur_batch = min(batch_size, remaining)
-        if start_mode == "bos":
-            prompt = torch.full(
-                (cur_batch, 1),
-                fill_value=bos_token_id,
-                dtype=torch.long,
-                device=device,
-            )
-        elif start_mode == "random_vertex":
-            if num_nodes is None or num_nodes <= 0:
-                raise ValueError(
-                    "num_nodes must be provided and positive for start_mode='random_vertex'."
-                )
-            start_tokens = rng.integers(0, int(num_nodes), size=cur_batch)
-            prompt = torch.as_tensor(
-                start_tokens[:, None],
-                dtype=torch.long,
-                device=device,
-            )
-        else:
-            raise ValueError(
-                "start_mode must be either 'bos' or 'random_vertex'."
-            )
+        prompt = torch.full(
+            (cur_batch, 1),
+            fill_value=bos_token_id,
+            dtype=torch.long,
+            device=device,
+        )
         generated = model.generate(
             prompt,
             max_new_tokens=max_length - 1,

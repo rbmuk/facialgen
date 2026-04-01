@@ -41,8 +41,8 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--num-sign-configs", type=int, default=8)
     parser.add_argument("--sign-seed", type=int, default=2026)
     parser.add_argument("--epoch-seed", type=int, default=99)
-    parser.add_argument("--context-size", type=int, default=32)
-    parser.add_argument("--stride", type=int, default=None)
+    parser.add_argument("--vertex-context-size", type=int, default=32)
+    parser.add_argument("--dart-stride", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -70,12 +70,6 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-max-length", type=int, default=None)
-    parser.add_argument(
-        "--eval-start-mode",
-        type=str,
-        choices=["bos", "random_vertex"],
-        default="bos",
-    )
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
     parser.add_argument("--use-link-prediction-split", action="store_true")
     return parser
@@ -108,12 +102,28 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _vertex_context_size_from_args(args: argparse.Namespace) -> int:
+    if hasattr(args, "vertex_context_size"):
+        return int(args.vertex_context_size)
+    return int(args.context_size)
+
+
+def _dart_stride_from_args(args: argparse.Namespace) -> int | None:
+    if hasattr(args, "dart_stride"):
+        value = args.dart_stride
+    else:
+        value = getattr(args, "stride", None)
+    return None if value is None else int(value)
+
+
 def build_training_objects(args: argparse.Namespace) -> tuple[
     CyclicFaceChunkDataset,
     torch.utils.data.DataLoader,
     FacialGen,
     dict[str, object],
 ]:
+    vertex_context_size = _vertex_context_size_from_args(args)
+    dart_stride = _dart_stride_from_args(args)
     A_full, X, y = load_graph_dataset_sparse(
         args.dataset_name,
         data_dir=args.data_dir,
@@ -159,8 +169,8 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     )
     chunk_ds = CyclicFaceChunkDataset(
         face_ds,
-        context_size=args.context_size,
-        stride=args.stride,
+        vertex_context_size=vertex_context_size,
+        dart_stride=dart_stride,
         epoch_seed=args.epoch_seed,
     )
     loader = make_face_chunk_dataloader(
@@ -174,7 +184,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     model = FacialGen(
         FacialGenConfig(
             vocab_size=chunk_ds.pad_token_id + 1,
-            block_size=args.context_size,
+            block_size=vertex_context_size,
             n_layer=args.n_layer,
             n_head=args.n_head,
             n_embd=args.n_embd,
@@ -188,8 +198,8 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     print(f"Dataset: {args.dataset_name}")
     print(f"LCC nodes: {n_lcc}")
     print(f"Full face sequences: {len(face_ds)}")
-    print(f"Chunk samples @ T={args.context_size}: {len(chunk_ds)}")
-    print(f"Chunk stride: {chunk_ds.stride}")
+    print(f"Chunk samples @ T={vertex_context_size}: {len(chunk_ds)}")
+    print(f"Dart stride: {chunk_ds.dart_stride}")
     print(
         f"Vocab: {face_ds.vocab_size + 1} "
         f"(vertices + BOS + EOS + PAD)"
@@ -318,7 +328,7 @@ def train_model(
         )
 
     eval_max_length = (
-        args.eval_max_length if args.eval_max_length is not None else args.context_size
+        args.eval_max_length if args.eval_max_length is not None else vertex_context_size
     )
     history: list[dict[str, float]] = []
 
@@ -384,9 +394,6 @@ def train_model(
                 bos_token_id=int(eval_info["bos_token_id"]),
                 eos_token_id=int(eval_info["eos_token_id"]),
                 device=device,
-                start_mode=args.eval_start_mode,
-                num_nodes=int(eval_info["num_nodes"]),
-                rng_seed=int(args.seed) + epoch if hasattr(args, "seed") else epoch,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
