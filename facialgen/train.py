@@ -116,6 +116,26 @@ def _dart_stride_from_args(args: argparse.Namespace) -> int | None:
     return None if value is None else int(value)
 
 
+def default_face_generation_max_length(
+    num_reference_edges: int,
+) -> int:
+    """
+    Heuristic long-face generation cap.
+
+    We target a full-graph dart budget of `2 * |E|` darts for one long
+    generated face. Since one dart is represented by two vertex tokens and
+    generation starts with `BOS`, the token budget is:
+
+        1 + 2 * (2 * |E|)
+
+    The terminal `EOS` may appear earlier if the model chooses to close the
+    face.
+    """
+    num_reference_edges = int(num_reference_edges)
+    desired_darts = 2 * num_reference_edges
+    return max(3, 1 + 2 * desired_darts)
+
+
 def build_training_objects(args: argparse.Namespace) -> tuple[
     CyclicFaceChunkDataset,
     torch.utils.data.DataLoader,
@@ -329,8 +349,11 @@ def train_model(
         )
 
     eval_max_length = (
-        args.eval_max_length if args.eval_max_length is not None else vertex_context_size
+        int(args.eval_max_length)
+        if args.eval_max_length is not None
+        else default_face_generation_max_length(int(eval_info["num_reference_edges"]))
     )
+    print(f"Eval generation max_length: {eval_max_length}")
     history: list[dict[str, float]] = []
 
     for epoch in range(start_epoch, args.epochs):
