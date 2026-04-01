@@ -249,7 +249,6 @@ def _sample_constrained_facial_batch(
     batch_size: int,
     max_length: int,
     bos_token_id: int,
-    eos_token_id: int | None,
     pad_token_id: int,
     model_block_size: int,
     device,
@@ -329,25 +328,10 @@ def _sample_constrained_facial_batch(
         ]
         masked_logits = next_token_logits.clone()
 
-        # Only vertices are valid ordinary samples. EOS is allowed only when
-        # the current faithful sequence is at a complete-face boundary.
+        # Only vertex ids are valid generation targets during evaluation.
+        # We intentionally disallow EOS here so every sampled sequence grows
+        # to the requested graph-scale budget.
         masked_logits[:, bos_token_id:] = -float("inf")
-        if eos_token_id is not None:
-            eos_column = next_token_logits[:, eos_token_id].clone()
-            eos_allowed = torch.tensor(
-                [
-                    (len(sampled_vertices[row_idx]) >= 2)
-                    and (len(sampled_vertices[row_idx]) % 2 == 0)
-                    for row_idx in need_model_rows
-                ],
-                dtype=torch.bool,
-                device=device,
-            )
-            masked_logits[:, eos_token_id] = torch.where(
-                eos_allowed,
-                eos_column,
-                torch.full_like(eos_column, -float("inf")),
-            )
         probs = torch.softmax(masked_logits, dim=-1)
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1).tolist()
 
@@ -355,9 +339,6 @@ def _sample_constrained_facial_batch(
             token = int(next_tokens[batch_row])
             sequences[row_idx].append(token)
             progressed = True
-            if eos_token_id is not None and token == int(eos_token_id):
-                finished[row_idx] = True
-                continue
 
             sampled_vertices[row_idx].append(token)
             if len(sampled_vertices[row_idx]) >= 3:
@@ -389,7 +370,7 @@ def sample_model_walks(
     The faithful facial-walk encoding alternates model-chosen vertex tokens with
     deterministic copied vertices that preserve the dart structure. This decoder
     only samples at the model-chosen positions, inserts the copied vertices
-    itself, and only accepts `EOS` at valid face-closure positions.
+    itself, and disallows `EOS` so generation runs to the requested cap.
     """
     import torch
     from tqdm.auto import tqdm
@@ -423,7 +404,6 @@ def sample_model_walks(
                 batch_size=cur_batch,
                 max_length=max_length,
                 bos_token_id=bos_token_id,
-                eos_token_id=eos_token_id,
                 pad_token_id=pad_token_id,
                 model_block_size=model_block_size,
                 device=device,

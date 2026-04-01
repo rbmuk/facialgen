@@ -122,17 +122,17 @@ def default_face_generation_max_length(
     """
     Heuristic long-face generation cap.
 
-    We target a full-graph dart budget of `2 * |E|` darts for one long
-    generated face. Since one dart is represented by two vertex tokens and
-    generation starts with `BOS`, the token budget is:
+    We target a graph-scale budget of about `|E|` darts for one long generated
+    face, which is roughly the `~15k`-dart regime on CoraML. Since one dart is
+    represented by two vertex tokens and generation starts with `BOS`, the
+    token budget is:
 
-        1 + 2 * (2 * |E|)
+        1 + 2 * |E|
 
-    The terminal `EOS` may appear earlier if the model chooses to close the
-    face.
+    Evaluation decoding does not emit EOS, so samples run to this cap.
     """
     num_reference_edges = int(num_reference_edges)
-    desired_darts = 2 * num_reference_edges
+    desired_darts = num_reference_edges
     return max(3, 1 + 2 * desired_darts)
 
 
