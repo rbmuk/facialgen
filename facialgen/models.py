@@ -24,6 +24,16 @@ def _require_transformers() -> None:
         )
 
 
+def _sanitize_hf_config_loss_type(hf_config: Any) -> Any:
+    """
+    Remove any generic `loss_type` attribute so this wrapper always uses the
+    standard causal LM loss path chosen by GPT-2 itself.
+    """
+    if hasattr(hf_config, "loss_type"):
+        delattr(hf_config, "loss_type")
+    return hf_config
+
+
 @dataclass
 class FacialGenConfig:
     vocab_size: int
@@ -42,7 +52,7 @@ class FacialGenConfig:
 
     def to_hf_config(self) -> Any:
         _require_transformers()
-        return GPT2Config(
+        hf_config = GPT2Config(
             vocab_size=self.vocab_size,
             n_positions=self.block_size,
             n_ctx=self.block_size,
@@ -64,6 +74,7 @@ class FacialGenConfig:
             pad_token_id=self.pad_token_id,
             use_cache=True,
         )
+        return _sanitize_hf_config_loss_type(hf_config)
 
 
 class FacialGen(nn.Module):
@@ -80,6 +91,8 @@ class FacialGen(nn.Module):
         self.config = config
         self.hf_config = config.to_hf_config()
         self.model = GPT2LMHeadModel(self.hf_config)
+        self.model.config = _sanitize_hf_config_loss_type(self.model.config)
+        self.hf_config = self.model.config
 
     def forward(
         self,
@@ -123,6 +136,7 @@ class FacialGen(nn.Module):
         return self.model.generate(**generation_kwargs)
 
     def save_pretrained(self, save_directory: str) -> None:
+        self.model.config = _sanitize_hf_config_loss_type(self.model.config)
         self.model.save_pretrained(save_directory)
 
     @classmethod
@@ -131,7 +145,8 @@ class FacialGen(nn.Module):
         model = cls.__new__(cls)
         nn.Module.__init__(model)
         hf_model = GPT2LMHeadModel.from_pretrained(pretrained_model_name_or_path)
-        hf_config = hf_model.config
+        hf_config = _sanitize_hf_config_loss_type(hf_model.config)
+        hf_model.config = hf_config
         model.config = FacialGenConfig(
             vocab_size=hf_config.vocab_size,
             block_size=hf_config.n_positions,

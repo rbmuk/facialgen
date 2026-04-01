@@ -135,24 +135,6 @@ def _sample_sign_configurations(
     )
 
 
-def _rotate_cycle(vertices: np.ndarray, offset: int) -> np.ndarray:
-    if vertices.size == 0:
-        return vertices.copy()
-    offset %= vertices.size
-    if offset == 0:
-        return vertices.copy()
-    return np.concatenate((vertices[offset:], vertices[:offset]))
-
-
-def _rotate_dart_face(face: list[tuple[int, int]], offset: int) -> list[tuple[int, int]]:
-    if not face:
-        return []
-    offset %= len(face)
-    if offset == 0:
-        return list(face)
-    return list(face[offset:]) + list(face[:offset])
-
-
 def _dart_face_to_faithful_vertex_sequence(
     face: list[tuple[int, int]],
 ) -> np.ndarray:
@@ -186,6 +168,38 @@ def _window_starts(
     if starts[-1] != tail_start:
         starts.append(tail_start)
     return starts
+
+
+def _slice_cyclic_vertex_window(
+    sequence: np.ndarray,
+    *,
+    start_token: int,
+    token_length: int,
+) -> np.ndarray:
+    if token_length <= 0:
+        return np.empty(0, dtype=sequence.dtype)
+    seq_len = int(sequence.size)
+    if seq_len == 0:
+        return np.empty(0, dtype=sequence.dtype)
+    start_token %= seq_len
+    stop_token = start_token + token_length
+    if stop_token <= seq_len:
+        return sequence[start_token:stop_token]
+    wrap = stop_token - seq_len
+    return np.concatenate((sequence[start_token:], sequence[:wrap]))
+
+
+def _faithful_vertex_sequence_to_dart_face(
+    sequence: np.ndarray,
+) -> list[tuple[int, int]]:
+    if sequence.size == 0:
+        return []
+    if sequence.size % 2 != 0:
+        raise ValueError("Faithful vertex sequence length must be even.")
+    return [
+        (int(sequence[2 * i]), int(sequence[2 * i + 1]))
+        for i in range(sequence.size // 2)
+    ]
 
 
 def build_face_vertex_sequences(
@@ -237,7 +251,6 @@ def build_face_vertex_sequences(
     eos_token_id = num_nodes + 1
 
     sequences: list[np.ndarray] = []
-    all_dart_faces: list[list[tuple[int, int]]] = []
     sign_config_index: list[int] = []
     face_index_within_config: list[int] = []
 
@@ -248,13 +261,11 @@ def build_face_vertex_sequences(
             tokens = vertex_face.copy()
 
             sequences.append(tokens)
-            all_dart_faces.append(list(dart_face))
             sign_config_index.append(config_idx)
             face_index_within_config.append(face_idx)
 
     return {
         "sequences": sequences,
-        "dart_faces": all_dart_faces,
         "signs": np.asarray(sign_matrix, dtype=np.int8),
         "sign_config_index": np.asarray(sign_config_index, dtype=np.int64),
         "face_index_within_config": np.asarray(face_index_within_config, dtype=np.int64),
@@ -299,7 +310,6 @@ class FacialWalkVertexDataset(Dataset):
         )
 
         self.sequences: list[np.ndarray] = built["sequences"]
-        self.dart_faces: list[list[tuple[int, int]]] = built["dart_faces"]
         self.signs: np.ndarray = built["signs"]
         self.sign_config_index: np.ndarray = built["sign_config_index"]
         self.face_index_within_config: np.ndarray = built["face_index_within_config"]
@@ -323,24 +333,27 @@ class FacialWalkVertexDataset(Dataset):
 
 class CyclicFaceChunkDataset(Dataset):
     """
-    Context-limited chunks from full dart faces with epoch-wise cyclic shifts.
+    Context-limited chunks from faithful full-face vertex sequences.
 
-    At each epoch, each face is rotated in dart space by a random cyclic offset.
-    The rotated dart face is then partitioned into overlapping dart windows.
-    Each window is converted to a faithful vertex sequence and prepended with
-    `BOS`. We append `EOS` only when the entire rotated face fits into a single
-    sample, i.e. when the face is short enough that no chunking is needed. Long
-    faces therefore contribute BOS-anchored interior or terminal fragments
-    without `EOS`. This is valid because a facial walk is a cyclic dart
-    sequence: after
-    rotating the face, any chosen dart-window can be treated as a legitimate
-    start of the sampled training view. In this dataset, `BOS` therefore marks
-    the beginning of the sampled window, not a unique canonical start of the
-    underlying face. Every training sample thus has the form
+    The stored face representation is the faithful dart-endpoint vertex
+    sequence, so each dart contributes two vertex tokens. At each epoch, each
+    face is rotated by a random cyclic offset measured in darts. Chunk
+    boundaries remain in dart units, but retrieval slices the already-stored
+    faithful vertex sequence at even token offsets so `__getitem__` does only
+    minimal wraparound slicing plus `BOS`/optional `EOS` handling. We append
+    `EOS` only when the entire rotated face fits into a single sample, i.e. when
+    the face is short enough that no chunking is needed. Long faces therefore
+    contribute BOS-anchored interior or terminal fragments without `EOS`. This
+    is valid because a facial walk is cyclic under dart rotation; after rotating
+    the face, any chosen dart-window can be treated as a legitimate start of the
+    sampled training view. In this dataset, `BOS` therefore marks the beginning
+    of the sampled window, not a unique canonical start of the underlying face.
+    Every training sample thus has the form
 
         [BOS] u_0 u_1 u_2 u_0 u_3 u_2 ... [EOS?]
 
-    where the vertices come from one contiguous dart-window in the rotated face.
+    where the vertices come from one contiguous dart-window in the rotated
+    faithful vertex sequence.
 
     For non-overlapping coverage in dart space, use
 
@@ -380,26 +393,54 @@ class CyclicFaceChunkDataset(Dataset):
         # dart. EOS is reserved only for genuinely unchunked short faces.
         self.max_darts_per_chunk = max((self.vertex_context_size - 1) // 2, 1)
         self.allow_tail_overlap = self.dart_stride != self.max_darts_per_chunk
-
-        self.chunk_to_face: list[tuple[int, int, int]] = []
+        self.face_lengths_vertices = np.asarray(
+            [len(sequence) for sequence in face_dataset.sequences],
+            dtype=np.int64,
+        )
+        self.face_lengths_darts = self.face_lengths_vertices // 2
         self.num_chunks_per_face = np.empty(len(face_dataset), dtype=np.int64)
 
-        for face_idx, dart_face in enumerate(face_dataset.dart_faces):
+        chunk_face_index: list[int] = []
+        chunk_index: list[int] = []
+        chunk_start: list[int] = []
+
+        for face_idx, face_length_darts in enumerate(self.face_lengths_darts.tolist()):
             starts = _window_starts(
-                len(dart_face),
+                face_length_darts,
                 self.max_darts_per_chunk,
                 self.dart_stride,
                 allow_tail_overlap=self.allow_tail_overlap,
             )
             self.num_chunks_per_face[face_idx] = len(starts)
-            for chunk_idx, start in enumerate(starts):
-                self.chunk_to_face.append((face_idx, chunk_idx, start))
+            for local_chunk_idx, start in enumerate(starts):
+                chunk_face_index.append(face_idx)
+                chunk_index.append(local_chunk_idx)
+                chunk_start.append(start)
+
+        self.chunk_face_index = np.asarray(chunk_face_index, dtype=np.int64)
+        self.chunk_index = np.asarray(chunk_index, dtype=np.int64)
+        self.chunk_start = np.asarray(chunk_start, dtype=np.int64)
+        self.chunk_to_face: list[tuple[int, int, int]] = list(
+            zip(
+                self.chunk_face_index.tolist(),
+                self.chunk_index.tolist(),
+                self.chunk_start.tolist(),
+            )
+        )
+        self.epoch_offsets_darts = np.zeros(len(face_dataset), dtype=np.int64)
+        self.epoch_offsets_vertices = np.zeros(len(face_dataset), dtype=np.int64)
+        self.set_epoch(0)
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
+        offsets_darts = np.zeros(len(self.face_dataset), dtype=np.int64)
+        for face_idx, face_length in enumerate(self.face_lengths_darts.tolist()):
+            offsets_darts[face_idx] = self._cyclic_offset(face_idx, face_length)
+        self.epoch_offsets_darts = offsets_darts
+        self.epoch_offsets_vertices = 2 * offsets_darts
 
     def __len__(self) -> int:
-        return len(self.chunk_to_face)
+        return int(self.chunk_face_index.size)
 
     def _cyclic_offset(self, face_idx: int, face_length: int) -> int:
         if face_length <= 1:
@@ -414,18 +455,28 @@ class CyclicFaceChunkDataset(Dataset):
         return int(rng.integers(0, face_length))
 
     def _rotated_dart_face(self, face_idx: int) -> list[tuple[int, int]]:
-        dart_face = self.face_dataset.dart_faces[face_idx]
-        offset = self._cyclic_offset(face_idx, len(dart_face))
-        return _rotate_dart_face(dart_face, offset)
+        rotated_vertices = _slice_cyclic_vertex_window(
+            self.face_dataset.sequences[face_idx],
+            start_token=int(self.epoch_offsets_vertices[face_idx]),
+            token_length=int(self.face_lengths_vertices[face_idx]),
+        )
+        return _faithful_vertex_sequence_to_dart_face(rotated_vertices)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        face_idx, chunk_idx, start = self.chunk_to_face[idx]
-        rotated_darts = self._rotated_dart_face(face_idx)
-        stop = min(start + self.max_darts_per_chunk, len(rotated_darts))
-        dart_chunk = rotated_darts[start:stop]
-        vertex_chunk = _dart_face_to_faithful_vertex_sequence(dart_chunk)
-        fits_without_chunking = len(rotated_darts) <= self.max_darts_per_chunk
-        add_eos = fits_without_chunking and stop == len(rotated_darts)
+        face_idx = int(self.chunk_face_index[idx])
+        chunk_idx = int(self.chunk_index[idx])
+        start = int(self.chunk_start[idx])
+        face_length_darts = int(self.face_lengths_darts[face_idx])
+        stop = min(start + self.max_darts_per_chunk, face_length_darts)
+        token_length = 2 * (stop - start)
+        token_start = int(self.epoch_offsets_vertices[face_idx]) + 2 * start
+        vertex_chunk = _slice_cyclic_vertex_window(
+            self.face_dataset.sequences[face_idx],
+            start_token=token_start,
+            token_length=token_length,
+        )
+        fits_without_chunking = face_length_darts <= self.max_darts_per_chunk
+        add_eos = fits_without_chunking and stop == face_length_darts
         chunk = np.empty(vertex_chunk.size + 1 + int(add_eos), dtype=np.int64)
         chunk[0] = self.face_dataset.bos_token_id
         chunk[1:1 + vertex_chunk.size] = vertex_chunk
@@ -437,8 +488,8 @@ class CyclicFaceChunkDataset(Dataset):
             "face_index": int(face_idx),
             "chunk_index": int(chunk_idx),
             "chunk_start": int(start),
-            "dart_length": int(len(dart_chunk)),
-            "is_terminal": bool(stop == len(rotated_darts)),
+            "dart_length": int(stop - start),
+            "is_terminal": bool(stop == face_length_darts),
             "has_eos": bool(add_eos),
             "num_chunks_for_face": int(self.num_chunks_per_face[face_idx]),
             "sign_config_index": int(self.face_dataset.sign_config_index[face_idx]),

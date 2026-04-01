@@ -68,8 +68,8 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         )
 
         face_idx = 0
-        original_darts = face_ds.dart_faces[face_idx]
-        self.assertGreater(len(original_darts), 2)
+        original_dart_count = len(face_ds.sequences[face_idx]) // 2
+        self.assertGreater(original_dart_count, 2)
 
         def collect_chunks(epoch: int) -> list[dict[str, object]]:
             chunk_ds.set_epoch(epoch)
@@ -101,7 +101,7 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         self.assertEqual(chunks_e0[0]["dart_length"], 2)
         self.assertEqual(
             chunks_e0[-1]["chunk_start"] + chunks_e0[-1]["dart_length"],
-            len(original_darts),
+            original_dart_count,
         )
         self.assertNotIn(face_ds.eos_token_id, chunks_e0[0]["tokens"].tolist())
         self.assertNotIn(face_ds.eos_token_id, chunks_e0[-1]["tokens"].tolist())
@@ -113,8 +113,8 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         for item in chunks_e1:
             start = item["chunk_start"]
             covered_e1.update(range(start, start + item["dart_length"]))
-        self.assertEqual(covered_e0, set(range(len(original_darts))))
-        self.assertEqual(covered_e1, set(range(len(original_darts))))
+        self.assertEqual(covered_e0, set(range(original_dart_count)))
+        self.assertEqual(covered_e1, set(range(original_dart_count)))
         self.assertFalse(np.array_equal(seq_e0, seq_e1))
 
     def test_chunk_tokens_match_rotated_dart_windows(self) -> None:
@@ -175,7 +175,7 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         for idx in range(len(chunk_ds)):
             item = chunk_ds[idx]
             face_idx = int(item["face_index"])
-            if len(face_ds.dart_faces[face_idx]) <= chunk_ds.max_darts_per_chunk:
+            if (len(face_ds.sequences[face_idx]) // 2) <= chunk_ds.max_darts_per_chunk:
                 found_short_face = True
                 self.assertTrue(bool(item["has_eos"]))
                 self.assertEqual(item["tokens"][-1].item(), face_ds.eos_token_id)
