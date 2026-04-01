@@ -252,6 +252,7 @@ def _sample_constrained_facial_batch(
     pad_token_id: int,
     model_block_size: int,
     device,
+    progress_bar=None,
 ) -> list[list[int]]:
     import torch
 
@@ -270,6 +271,7 @@ def _sample_constrained_facial_batch(
 
     while not np.all(finished):
         progressed = False
+        num_appended_tokens = 0
 
         for row_idx in range(batch_size):
             if finished[row_idx] or not pending_copy[row_idx]:
@@ -280,6 +282,7 @@ def _sample_constrained_facial_batch(
                 finished[row_idx] = True
                 continue
             sequences[row_idx].append(int(copied))
+            num_appended_tokens += 1
             pending_copy[row_idx] = False
             progressed = True
             if len(sequences[row_idx]) >= max_length:
@@ -338,6 +341,7 @@ def _sample_constrained_facial_batch(
         for batch_row, row_idx in enumerate(need_model_rows):
             token = int(next_tokens[batch_row])
             sequences[row_idx].append(token)
+            num_appended_tokens += 1
             progressed = True
 
             sampled_vertices[row_idx].append(token)
@@ -348,6 +352,9 @@ def _sample_constrained_facial_batch(
 
         if not progressed:
             break
+
+        if progress_bar is not None and num_appended_tokens > 0:
+            progress_bar.update(int(num_appended_tokens))
 
     return sequences
 
@@ -378,7 +385,7 @@ def sample_model_walks(
     model.eval()
     walks: list[list[int]] = []
     remaining = int(num_samples)
-    total_batches = (remaining + batch_size - 1) // batch_size
+    total_token_budget = max(0, remaining * max(max_length - 1, 0))
     hf_config = getattr(model, "hf_config", None)
     model_block_size = int(
         getattr(getattr(model, "config", None), "block_size", 0)
@@ -391,9 +398,10 @@ def sample_model_walks(
         else getattr(hf_config, "pad_token_id", bos_token_id)
     )
     pbar = tqdm(
-        total=total_batches,
+        total=total_token_budget,
         desc=progress_desc,
         disable=not show_progress,
+        unit="tok",
     )
 
     with torch.inference_mode():
@@ -407,11 +415,16 @@ def sample_model_walks(
                 pad_token_id=pad_token_id,
                 model_block_size=model_block_size,
                 device=device,
+                progress_bar=pbar,
             )
             walks.extend(sequences)
 
             remaining -= cur_batch
-            pbar.update(1)
+            if show_progress:
+                pbar.set_postfix_str(
+                    f"walks={len(walks)}/{num_samples}",
+                    refresh=False,
+                )
 
     pbar.close()
     return walks
