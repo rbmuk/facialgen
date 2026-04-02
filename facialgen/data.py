@@ -202,6 +202,14 @@ def _faithful_vertex_sequence_to_dart_face(
     ]
 
 
+def _csr_neighbor_lists(A: sp.spmatrix) -> list[np.ndarray]:
+    A = sp.csr_matrix(A)
+    return [
+        A.indices[A.indptr[i]:A.indptr[i + 1]].astype(np.int64, copy=True)
+        for i in range(A.shape[0])
+    ]
+
+
 def build_face_vertex_sequences(
     A: sp.spmatrix,
     curvature: np.ndarray,
@@ -502,6 +510,86 @@ class CyclicFaceChunkDataset(Dataset):
         }
 
 
+class RandomWalkChunkDataset(Dataset):
+    """
+    Fixed-length BOS-anchored random walks sampled from a graph.
+
+    Each sample has the form
+
+        [BOS] v_0 v_1 ... v_{L-1}
+
+    where consecutive vertex pairs are actual random-walk transitions in the
+    graph. The walk is re-sampled each epoch from a deterministic epoch/index
+    seed so repeated epochs expose different random walks without storing a huge
+    precomputed corpus.
+    """
+
+    def __init__(
+        self,
+        A: sp.spmatrix,
+        *,
+        num_walks: int,
+        vertex_context_size: int,
+        epoch_seed: int = 0,
+        bos_token_id: int | None = None,
+        pad_token_id: int | None = None,
+    ) -> None:
+        _require_torch()
+
+        self.A = sp.csr_matrix(A)
+        self.num_nodes = int(self.A.shape[0])
+        self.num_walks = int(num_walks)
+        if self.num_walks <= 0:
+            raise ValueError("num_walks must be positive.")
+        self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
+        self.walk_length = max(self.vertex_context_size - 1, 1)
+        self.epoch_seed = int(epoch_seed)
+        self.epoch = 0
+        self.bos_token_id = self.num_nodes if bos_token_id is None else int(bos_token_id)
+        self.eos_token_id = self.num_nodes + 1
+        self.vocab_size = self.num_nodes + 2
+        self.pad_token_id = self.vocab_size if pad_token_id is None else int(pad_token_id)
+        self.neighbors = _csr_neighbor_lists(self.A)
+        if any(len(nbrs) == 0 for nbrs in self.neighbors):
+            raise ValueError("Random-walk dataset requires a graph with no isolated nodes.")
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return self.num_walks
+
+    def _sample_walk_vertices(self, idx: int) -> np.ndarray:
+        seed = self.epoch_seed + 1_000_003 * self.epoch + 97_003 * int(idx)
+        rng = np.random.default_rng(seed)
+        verts = np.empty(self.walk_length, dtype=np.int64)
+        current = int(rng.integers(0, self.num_nodes))
+        verts[0] = current
+        for step in range(1, self.walk_length):
+            nbrs = self.neighbors[current]
+            current = int(nbrs[rng.integers(0, len(nbrs))])
+            verts[step] = current
+        return verts
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        vertices = self._sample_walk_vertices(int(idx))
+        tokens = np.empty(vertices.size + 1, dtype=np.int64)
+        tokens[0] = self.bos_token_id
+        tokens[1:] = vertices
+        return {
+            "tokens": torch.as_tensor(tokens, dtype=torch.long),
+            "face_index": int(idx),
+            "chunk_index": 0,
+            "chunk_start": 0,
+            "dart_length": int(max(vertices.size - 1, 0)),
+            "is_terminal": True,
+            "has_eos": False,
+            "num_chunks_for_face": 1,
+            "sign_config_index": -1,
+            "face_index_within_config": int(idx),
+        }
+
+
 class FaceChunkCollator:
     """Pad chunked face sequences for transformer-style training."""
 
@@ -541,46 +629,46 @@ class FaceChunkCollator:
             "labels": labels,
             "lengths": lengths,
             "face_index": torch.tensor(
-                [item["face_index"] for item in batch],
+                [item.get("face_index", -1) for item in batch],
                 dtype=torch.long,
             ),
             "chunk_index": torch.tensor(
-                [item["chunk_index"] for item in batch],
+                [item.get("chunk_index", -1) for item in batch],
                 dtype=torch.long,
             ),
             "chunk_start": torch.tensor(
-                [item["chunk_start"] for item in batch],
+                [item.get("chunk_start", -1) for item in batch],
                 dtype=torch.long,
             ),
             "dart_length": torch.tensor(
-                [item["dart_length"] for item in batch],
+                [item.get("dart_length", -1) for item in batch],
                 dtype=torch.long,
             ),
             "is_terminal": torch.tensor(
-                [item["is_terminal"] for item in batch],
+                [item.get("is_terminal", False) for item in batch],
                 dtype=torch.bool,
             ),
             "has_eos": torch.tensor(
-                [item["has_eos"] for item in batch],
+                [item.get("has_eos", False) for item in batch],
                 dtype=torch.bool,
             ),
             "num_chunks_for_face": torch.tensor(
-                [item["num_chunks_for_face"] for item in batch],
+                [item.get("num_chunks_for_face", 1) for item in batch],
                 dtype=torch.long,
             ),
             "sign_config_index": torch.tensor(
-                [item["sign_config_index"] for item in batch],
+                [item.get("sign_config_index", -1) for item in batch],
                 dtype=torch.long,
             ),
             "face_index_within_config": torch.tensor(
-                [item["face_index_within_config"] for item in batch],
+                [item.get("face_index_within_config", -1) for item in batch],
                 dtype=torch.long,
             ),
         }
 
 
 def make_face_chunk_dataloader(
-    chunk_dataset: CyclicFaceChunkDataset,
+    chunk_dataset: Dataset,
     *,
     batch_size: int,
     shuffle: bool = True,

@@ -5,7 +5,11 @@ import unittest
 import numpy as np
 import scipy.sparse as sp
 
-from facialgen.data import CyclicFaceChunkDataset, FacialWalkVertexDataset
+from facialgen.data import (
+    CyclicFaceChunkDataset,
+    FacialWalkVertexDataset,
+    RandomWalkChunkDataset,
+)
 from facialgen.early_stopping import (
     connected_link_prediction_split,
     edge_overlap_ratio,
@@ -184,6 +188,26 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
 
         self.assertTrue(found_short_face)
 
+    def test_random_walk_chunk_dataset_emits_bos_anchored_fixed_length_walks(self) -> None:
+        A, _ = toy_graph()
+        chunk_ds = RandomWalkChunkDataset(
+            A,
+            num_walks=8,
+            vertex_context_size=6,
+            epoch_seed=13,
+        )
+
+        item = chunk_ds[0]
+        tokens = item["tokens"].tolist()
+        self.assertEqual(tokens[0], chunk_ds.bos_token_id)
+        self.assertEqual(len(tokens), 6)
+        self.assertEqual(item["dart_length"], 4)
+        self.assertFalse(bool(item["has_eos"]))
+
+        chunk_ds.set_epoch(1)
+        item_epoch_1 = chunk_ds[0]
+        self.assertNotEqual(tokens, item_epoch_1["tokens"].tolist())
+
 
 class EvaluationSmokeTests(unittest.TestCase):
     def test_transition_counts_use_only_dart_pairs(self) -> None:
@@ -198,6 +222,22 @@ class EvaluationSmokeTests(unittest.TestCase):
         self.assertEqual(S[3, 2], 1.0)
         self.assertEqual(S[1, 2], 0.0)
         self.assertEqual(S[0, 3], 0.0)
+
+    def test_transition_counts_for_random_walks_use_adjacent_pairs(self) -> None:
+        walks = [
+            [10, 0, 1, 2, 3, 11],
+        ]
+
+        S = transition_count_matrix_from_walks(
+            walks,
+            num_nodes=4,
+            walk_type="random",
+        ).toarray()
+
+        self.assertEqual(S[0, 1], 1.0)
+        self.assertEqual(S[1, 2], 1.0)
+        self.assertEqual(S[2, 3], 1.0)
+        self.assertEqual(S[2, 0], 0.0)
 
     def test_connected_link_prediction_split_keeps_train_connected(self) -> None:
         A = sp.csr_matrix(

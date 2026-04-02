@@ -16,6 +16,7 @@ from .curvature import largest_connected_component, resistance_curvature
 from .data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
+    RandomWalkChunkDataset,
     load_graph_dataset_sparse,
     make_face_chunk_dataloader,
 )
@@ -43,6 +44,12 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--epoch-seed", type=int, default=99)
     parser.add_argument("--vertex-context-size", type=int, default=32)
     parser.add_argument("--dart-stride", type=int, default=None)
+    parser.add_argument(
+        "--walk-type",
+        type=str,
+        choices=["facial", "random"],
+        default="facial",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -137,6 +144,19 @@ def default_face_generation_max_length(
     return max(3, 1 + 2 * desired_darts)
 
 
+def default_random_walk_generation_max_length(
+    vertex_context_size: int,
+) -> int:
+    """
+    Default short random-walk generation cap.
+
+    Random-walk training samples are BOS followed by `vertex_context_size - 1`
+    vertex ids, so generation should mirror that directly.
+    """
+    vertex_context_size = int(vertex_context_size)
+    return max(2, vertex_context_size)
+
+
 def build_training_objects(args: argparse.Namespace) -> tuple[
     CyclicFaceChunkDataset,
     torch.utils.data.DataLoader,
@@ -182,18 +202,44 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         rhs_scale=float(n_lcc),
     )
 
-    face_ds = FacialWalkVertexDataset(
-        train_adj,
-        curvature,
-        num_sign_configs=args.num_sign_configs,
-        sign_seed=args.sign_seed,
-    )
-    chunk_ds = CyclicFaceChunkDataset(
-        face_ds,
-        vertex_context_size=vertex_context_size,
-        dart_stride=dart_stride,
-        epoch_seed=args.epoch_seed,
-    )
+    walk_type = getattr(args, "walk_type", "facial")
+    if walk_type == "facial":
+        face_ds = FacialWalkVertexDataset(
+            train_adj,
+            curvature,
+            num_sign_configs=args.num_sign_configs,
+            sign_seed=args.sign_seed,
+        )
+        chunk_ds = CyclicFaceChunkDataset(
+            face_ds,
+            vertex_context_size=vertex_context_size,
+            dart_stride=dart_stride,
+            epoch_seed=args.epoch_seed,
+        )
+        bos_token_id = face_ds.bos_token_id
+        eos_token_id = face_ds.eos_token_id
+        vocab_size = chunk_ds.pad_token_id + 1
+        dataset_size_desc = f"Full face sequences: {len(face_ds)}"
+    elif walk_type == "random":
+        walk_edge_length = max(vertex_context_size - 2, 1)
+        approx_darts_per_sign_config = 2 * ref_num_edges
+        num_walks = max(
+            int(round(args.num_sign_configs * approx_darts_per_sign_config / walk_edge_length)),
+            n_lcc,
+        )
+        chunk_ds = RandomWalkChunkDataset(
+            train_adj,
+            num_walks=num_walks,
+            vertex_context_size=vertex_context_size,
+            epoch_seed=args.epoch_seed,
+        )
+        bos_token_id = chunk_ds.bos_token_id
+        eos_token_id = chunk_ds.eos_token_id
+        vocab_size = chunk_ds.pad_token_id + 1
+        dataset_size_desc = f"Random-walk samples: {len(chunk_ds)}"
+    else:
+        raise ValueError(f"Unsupported walk_type={walk_type!r}")
+
     loader = make_face_chunk_dataloader(
         chunk_ds,
         batch_size=args.batch_size,
@@ -204,25 +250,27 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
 
     model = FacialGen(
         FacialGenConfig(
-            vocab_size=chunk_ds.pad_token_id + 1,
+            vocab_size=vocab_size,
             block_size=vertex_context_size,
             n_layer=args.n_layer,
             n_head=args.n_head,
             n_embd=args.n_embd,
             dropout=args.dropout,
-            bos_token_id=face_ds.bos_token_id,
-            eos_token_id=face_ds.eos_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
             pad_token_id=chunk_ds.pad_token_id,
         )
     )
 
     print(f"Dataset: {args.dataset_name}")
+    print(f"Walk type: {walk_type}")
     print(f"LCC nodes: {n_lcc}")
-    print(f"Full face sequences: {len(face_ds)}")
+    print(dataset_size_desc)
     print(f"Chunk samples @ T={vertex_context_size}: {len(chunk_ds)}")
-    print(f"Dart stride: {chunk_ds.dart_stride}")
+    if hasattr(chunk_ds, "dart_stride"):
+        print(f"Dart stride: {chunk_ds.dart_stride}")
     print(
-        f"Vocab: {face_ds.vocab_size + 1} "
+        f"Vocab: {vocab_size} "
         f"(vertices + BOS + EOS + PAD)"
     )
 
@@ -232,9 +280,10 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "train_adj": train_adj,
         "num_nodes": n_lcc,
         "num_reference_edges": ref_num_edges,
-        "bos_token_id": face_ds.bos_token_id,
-        "eos_token_id": face_ds.eos_token_id,
+        "bos_token_id": bos_token_id,
+        "eos_token_id": eos_token_id,
         "link_prediction_split": lp_split,
+        "walk_type": walk_type,
     }
 
     return chunk_ds, loader, model, eval_info
@@ -399,10 +448,16 @@ def train_model(
             min_delta=args.early_stop_min_delta,
         )
 
+    walk_type = str(getattr(args, "walk_type", "facial"))
+    default_eval_max_length = (
+        default_face_generation_max_length(vertex_context_size)
+        if walk_type == "facial"
+        else default_random_walk_generation_max_length(vertex_context_size)
+    )
     eval_max_length = (
         int(args.eval_max_length)
         if args.eval_max_length is not None
-        else default_face_generation_max_length(vertex_context_size)
+        else default_eval_max_length
     )
     print(f"Eval generation max_length: {eval_max_length}")
     history: list[dict[str, float]] = load_history_snapshot(args.save_dir)
@@ -468,6 +523,7 @@ def train_model(
                 max_length=eval_max_length,
                 bos_token_id=int(eval_info["bos_token_id"]),
                 device=device,
+                walk_type=walk_type,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
@@ -481,6 +537,7 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     positive_edges=lp_split["val_edges"],
                     negative_edges=lp_split["val_non_edges"],
+                    walk_type=walk_type,
                 )
                 val_score = 0.5 * (
                     scores["roc_auc"] + scores["average_precision"]
@@ -498,6 +555,7 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
+                    walk_type=walk_type,
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)
@@ -530,6 +588,7 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
+                    walk_type=walk_type,
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)

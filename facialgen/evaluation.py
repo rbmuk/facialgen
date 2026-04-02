@@ -28,6 +28,7 @@ def transition_count_matrix_from_walks(
     walks: Iterable[Sequence[int]],
     *,
     num_nodes: int,
+    walk_type: str = "facial",
 ) -> sp.csr_matrix:
     """
     Count dart transitions across faithful generated walks.
@@ -48,15 +49,27 @@ def transition_count_matrix_from_walks(
     """
     counts: dict[tuple[int, int], float] = {}
 
+    walk_type = str(walk_type)
+
     for walk in walks:
         vertices = _extract_valid_vertex_tokens(walk, num_nodes)
-        even_len = len(vertices) - (len(vertices) % 2)
-        for idx in range(0, even_len, 2):
-            u = int(vertices[idx])
-            v = int(vertices[idx + 1])
-            if u == v:
-                continue
-            counts[(u, v)] = counts.get((u, v), 0.0) + 1.0
+        if walk_type == "facial":
+            even_len = len(vertices) - (len(vertices) % 2)
+            for idx in range(0, even_len, 2):
+                u = int(vertices[idx])
+                v = int(vertices[idx + 1])
+                if u == v:
+                    continue
+                counts[(u, v)] = counts.get((u, v), 0.0) + 1.0
+        elif walk_type == "random":
+            for idx in range(0, max(len(vertices) - 1, 0)):
+                u = int(vertices[idx])
+                v = int(vertices[idx + 1])
+                if u == v:
+                    continue
+                counts[(u, v)] = counts.get((u, v), 0.0) + 1.0
+        else:
+            raise ValueError(f"Unsupported walk_type={walk_type!r}")
 
     if not counts:
         return sp.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
@@ -177,6 +190,7 @@ def reconstruct_graph_from_generated_walks(
     num_nodes: int,
     target_num_edges: int | None = None,
     seed: int | None = None,
+    walk_type: str = "facial",
 ) -> tuple[sp.csr_matrix, sp.csr_matrix]:
     """
     Build a synthetic undirected graph from generated walks.
@@ -185,7 +199,11 @@ def reconstruct_graph_from_generated_walks(
     - `S` is the directed transition count matrix
     - `A_hat` is the sampled undirected binary adjacency matrix
     """
-    S = transition_count_matrix_from_walks(walks, num_nodes=num_nodes)
+    S = transition_count_matrix_from_walks(
+        walks,
+        num_nodes=num_nodes,
+        walk_type=walk_type,
+    )
     A_hat = sample_graph_from_scores(
         S,
         target_num_edges=target_num_edges,

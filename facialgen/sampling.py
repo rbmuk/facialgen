@@ -123,6 +123,79 @@ def _sample_constrained_facial_batch(
     return sequences
 
 
+def _sample_random_walk_batch(
+    model,
+    *,
+    batch_size: int,
+    max_length: int,
+    bos_token_id: int,
+    pad_token_id: int,
+    model_block_size: int,
+    device,
+) -> list[list[int]]:
+    import torch
+
+    sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(batch_size)]
+
+    while True:
+        active_rows = [
+            row_idx for row_idx in range(batch_size)
+            if len(sequences[row_idx]) < max_length
+        ]
+        if not active_rows:
+            break
+
+        prompt_lengths = [
+            min(len(sequences[row_idx]), model_block_size)
+            for row_idx in active_rows
+        ]
+        prompt_max_len = max(prompt_lengths)
+        input_ids = torch.full(
+            (len(active_rows), prompt_max_len),
+            fill_value=pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+        attention_mask = torch.zeros(
+            (len(active_rows), prompt_max_len),
+            dtype=torch.bool,
+            device=device,
+        )
+        for batch_row, row_idx in enumerate(active_rows):
+            prompt = sequences[row_idx][-model_block_size:]
+            prompt_tensor = torch.tensor(prompt, dtype=torch.long, device=device)
+            input_ids[batch_row, : prompt_tensor.numel()] = prompt_tensor
+            attention_mask[batch_row, : prompt_tensor.numel()] = True
+
+        outputs = model(
+            input_ids,
+            attention_mask=attention_mask,
+            labels=None,
+        )
+        logits = outputs["logits"]
+        next_token_logits = logits[
+            torch.arange(len(active_rows), device=device),
+            torch.tensor(prompt_lengths, device=device) - 1,
+        ]
+        masked_logits = next_token_logits.clone()
+        masked_logits[:, bos_token_id:] = -float("inf")
+
+        for batch_row, row_idx in enumerate(active_rows):
+            seq = sequences[row_idx]
+            if len(seq) >= 2:
+                prev_vertex = int(seq[-1])
+                if 0 <= prev_vertex < bos_token_id:
+                    masked_logits[batch_row, prev_vertex] = -float("inf")
+
+        probs = torch.softmax(masked_logits, dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1).tolist()
+
+        for batch_row, row_idx in enumerate(active_rows):
+            sequences[row_idx].append(int(next_tokens[batch_row]))
+
+    return sequences
+
+
 def sample_model_walks(
     model,
     *,
@@ -130,6 +203,7 @@ def sample_model_walks(
     max_length: int,
     bos_token_id: int,
     device,
+    walk_type: str = "facial",
     batch_size: int = 128,
     show_progress: bool = False,
     progress_desc: str = "sampling walks",
@@ -148,6 +222,7 @@ def sample_model_walks(
     model.eval()
     walks: list[list[int]] = []
     remaining = int(num_samples)
+    walk_type = str(walk_type)
     hf_config = getattr(model, "hf_config", None)
     model_block_size = int(
         getattr(getattr(model, "config", None), "block_size", 0)
@@ -169,15 +244,28 @@ def sample_model_walks(
     with torch.inference_mode():
         while remaining > 0:
             cur_batch = min(batch_size, remaining)
-            sequences = _sample_constrained_facial_batch(
-                model,
-                batch_size=cur_batch,
-                max_length=max_length,
-                bos_token_id=bos_token_id,
-                pad_token_id=pad_token_id,
-                model_block_size=model_block_size,
-                device=device,
-            )
+            if walk_type == "facial":
+                sequences = _sample_constrained_facial_batch(
+                    model,
+                    batch_size=cur_batch,
+                    max_length=max_length,
+                    bos_token_id=bos_token_id,
+                    pad_token_id=pad_token_id,
+                    model_block_size=model_block_size,
+                    device=device,
+                )
+            elif walk_type == "random":
+                sequences = _sample_random_walk_batch(
+                    model,
+                    batch_size=cur_batch,
+                    max_length=max_length,
+                    bos_token_id=bos_token_id,
+                    pad_token_id=pad_token_id,
+                    model_block_size=model_block_size,
+                    device=device,
+                )
+            else:
+                raise ValueError(f"Unsupported walk_type={walk_type!r}")
             walks.extend(sequences)
 
             remaining -= cur_batch

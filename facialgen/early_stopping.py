@@ -234,8 +234,13 @@ def link_prediction_scores_from_walks(
     num_nodes: int,
     positive_edges: np.ndarray,
     negative_edges: np.ndarray,
+    walk_type: str = "facial",
 ) -> dict[str, float]:
-    S = transition_count_matrix_from_walks(walks, num_nodes=num_nodes)
+    S = transition_count_matrix_from_walks(
+        walks,
+        num_nodes=num_nodes,
+        walk_type=walk_type,
+    )
     return link_prediction_scores_from_transition_matrix(
         S,
         positive_edges=positive_edges,
