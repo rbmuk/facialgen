@@ -337,6 +337,11 @@ def add_generated_graph_stats_to_epoch_record(
         epoch_record[f"generated_{key}"] = float(value)
 
 
+def _num_undirected_edges(A: sp.spmatrix) -> int:
+    A = sp.csr_matrix(A)
+    return int(sp.triu(A, k=1).nnz)
+
+
 def train_model(
     args: argparse.Namespace,
 ) -> tuple[FacialGen, dict[str, object], list[dict[str, float]]]:
@@ -474,6 +479,14 @@ def train_model(
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                 )
+                ref_num_edges = int(eval_info["num_reference_edges"])
+                gen_num_edges = _num_undirected_edges(A_hat)
+                print(
+                    "  graph_edges: "
+                    f"reference={ref_num_edges} "
+                    f"target={ref_num_edges} "
+                    f"generated={gen_num_edges}"
+                )
                 add_generated_graph_stats_to_epoch_record(
                     epoch_record,
                     A_hat,
@@ -497,6 +510,14 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
+                )
+                ref_num_edges = int(eval_info["num_reference_edges"])
+                gen_num_edges = _num_undirected_edges(A_hat)
+                print(
+                    "  graph_edges: "
+                    f"reference={ref_num_edges} "
+                    f"target={ref_num_edges} "
+                    f"generated={gen_num_edges}"
                 )
                 add_generated_graph_stats_to_epoch_record(
                     epoch_record,
