@@ -259,7 +259,8 @@ def _sample_constrained_facial_batch(
     def make_prompt_tokens(sequence: list[int]) -> list[int]:
         if len(sequence) <= model_block_size:
             return list(sequence)
-        suffix_len = max(model_block_size - 1, 0)
+        payload_capacity = max(model_block_size - 1, 0)
+        suffix_len = payload_capacity - (payload_capacity % 2)
         if suffix_len == 0:
             return [int(bos_token_id)]
         return [int(bos_token_id), *sequence[-suffix_len:]]
@@ -335,6 +336,16 @@ def _sample_constrained_facial_batch(
         # We intentionally disallow EOS here so every sampled sequence grows
         # to the requested graph-scale budget.
         masked_logits[:, bos_token_id:] = -float("inf")
+        for batch_row, row_idx in enumerate(need_model_rows):
+            verts = sampled_vertices[row_idx]
+            if not verts:
+                continue
+            if len(verts) <= 2:
+                partner = int(verts[0])
+            else:
+                partner = int(verts[-1])
+            if 0 <= partner < bos_token_id:
+                masked_logits[batch_row, partner] = -float("inf")
         probs = torch.softmax(masked_logits, dim=-1)
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1).tolist()
 
