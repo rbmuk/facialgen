@@ -292,6 +292,26 @@ def maybe_resume_training(
     return latest_epoch
 
 
+def load_history_snapshot(
+    save_dir: str | None,
+) -> list[dict[str, float]]:
+    if save_dir is None:
+        return []
+
+    history_path = Path(save_dir) / "history.json"
+    if not history_path.exists():
+        return []
+
+    try:
+        raw = json.loads(history_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(raw, list):
+        return []
+    return raw
+
+
 def save_final_training_artifacts(
     model: FacialGen,
     history: list[dict[str, float]],
@@ -385,7 +405,7 @@ def train_model(
         else default_face_generation_max_length(vertex_context_size)
     )
     print(f"Eval generation max_length: {eval_max_length}")
-    history: list[dict[str, float]] = []
+    history: list[dict[str, float]] = load_history_snapshot(args.save_dir)
 
     for epoch in range(start_epoch, args.epochs):
         model.train()

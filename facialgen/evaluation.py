@@ -98,7 +98,8 @@ def sample_graph_from_scores(
 
     edges: set[tuple[int, int]] = set()
 
-    # Step 1: ensure each node has at least one incident edge whenever possible.
+    # Step 1: ensure each node has at least one incident edge whenever possible
+    # by row-wise sampling proportional to the symmetrized transition scores.
     for i in range(n):
         row_start, row_stop = S.indptr[i], S.indptr[i + 1]
         nbrs = S.indices[row_start:row_stop]
@@ -106,22 +107,28 @@ def sample_graph_from_scores(
         if nbrs.size == 0:
             continue
 
-        order = rng.permutation(nbrs.size)
-        sampled = False
-        for idx in order:
-            j = int(nbrs[idx])
+        candidate_edges: list[tuple[int, int]] = []
+        candidate_weights: list[float] = []
+        for j, weight in zip(nbrs.tolist(), vals.tolist()):
+            j = int(j)
             if i == j:
                 continue
             edge = (i, j) if i < j else (j, i)
             if edge in edges:
                 continue
-            edges.add(edge)
-            sampled = True
-            break
+            candidate_edges.append(edge)
+            candidate_weights.append(float(weight))
 
-        if not sampled:
-            # All candidates were already selected.
+        if not candidate_edges:
             continue
+
+        weights = np.asarray(candidate_weights, dtype=np.float64)
+        total = float(weights.sum())
+        if total <= 0.0:
+            continue
+        probs = weights / total
+        idx = int(rng.choice(len(candidate_edges), p=probs))
+        edges.add(candidate_edges[idx])
 
     # Step 2: global edge sampling without replacement until target edge count.
     upper = sp.triu(S, k=1).tocoo()
