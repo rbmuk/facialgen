@@ -26,7 +26,7 @@ from .early_stopping import (
     link_prediction_scores_from_walks,
     sample_model_walks,
 )
-from .evaluation import reconstruct_graph_from_generated_walks
+from .evaluation import compute_graph_statistics, reconstruct_graph_from_generated_walks
 from .models import FacialGen, FacialGenConfig
 
 
@@ -311,6 +311,31 @@ def save_final_training_artifacts(
     )
 
 
+def save_history_snapshot(
+    history: list[dict[str, float]],
+    save_dir: str | None,
+) -> None:
+    if save_dir is None:
+        return
+
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "history.json").write_text(json.dumps(history, indent=2))
+
+
+def add_generated_graph_stats_to_epoch_record(
+    epoch_record: dict[str, float],
+    A_hat: sp.csr_matrix,
+    *,
+    reference_labels: np.ndarray | None,
+) -> None:
+    graph_stats = compute_graph_statistics(A_hat, labels=reference_labels)
+    for key, value in graph_stats.items():
+        if value is None:
+            continue
+        epoch_record[f"generated_{key}"] = float(value)
+
+
 def train_model(
     args: argparse.Namespace,
 ) -> tuple[FacialGen, dict[str, object], list[dict[str, float]]]:
@@ -443,8 +468,20 @@ def train_model(
                 epoch_record["val_roc_auc"] = float(scores["roc_auc"])
                 epoch_record["val_ap"] = float(scores["average_precision"])
                 epoch_record["val_score"] = float(val_score)
+                A_hat, _ = reconstruct_graph_from_generated_walks(
+                    walks,
+                    num_nodes=int(eval_info["num_nodes"]),
+                    target_num_edges=int(eval_info["num_reference_edges"]),
+                    seed=args.split_seed + epoch,
+                )
+                add_generated_graph_stats_to_epoch_record(
+                    epoch_record,
+                    A_hat,
+                    reference_labels=eval_info["reference_labels"],
+                )
                 should_stop = early_state.update(val_score, step=epoch + 1)
                 history.append(epoch_record)
+                save_history_snapshot(history, args.save_dir)
                 if should_stop:
                     print(
                         "Early stopping triggered by VAL criterion at "
@@ -461,6 +498,11 @@ def train_model(
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                 )
+                add_generated_graph_stats_to_epoch_record(
+                    epoch_record,
+                    A_hat,
+                    reference_labels=eval_info["reference_labels"],
+                )
                 overlap = edge_overlap_ratio(A_hat, eval_info["reference_adj"])
                 print(
                     f"  edge_overlap={overlap:.4f} "
@@ -468,6 +510,7 @@ def train_model(
                 )
                 epoch_record["edge_overlap"] = float(overlap)
                 history.append(epoch_record)
+                save_history_snapshot(history, args.save_dir)
                 if overlap >= args.target_edge_overlap:
                     print(
                         "Early stopping triggered by edge-overlap criterion at "
@@ -477,8 +520,10 @@ def train_model(
                     break
             else:
                 history.append(epoch_record)
+                save_history_snapshot(history, args.save_dir)
         else:
             history.append(epoch_record)
+            save_history_snapshot(history, args.save_dir)
 
         maybe_save_checkpoint(model, optimizer, epoch + 1, args.save_dir)
 
