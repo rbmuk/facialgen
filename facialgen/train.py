@@ -117,22 +117,23 @@ def _dart_stride_from_args(args: argparse.Namespace) -> int | None:
 
 
 def default_face_generation_max_length(
-    num_reference_edges: int,
+    vertex_context_size: int,
 ) -> int:
     """
-    Heuristic long-face generation cap.
+    Default short-fragment generation cap.
 
-    We target a graph-scale budget of about `|E|` darts for one long generated
-    face, which is roughly the `~15k`-dart regime on CoraML. Since one dart is
-    represented by two vertex tokens and generation starts with `BOS`, the
-    token budget is:
+    Evaluation generation should stay aligned with the training regime:
+    `BOS` followed by as many complete darts as fit in the vertex context.
+    Since one dart is represented by two vertex tokens and we reserve one token
+    for `BOS`, the cap is:
 
-        1 + 2 * |E|
+        1 + 2 * floor((vertex_context_size - 1) / 2)
 
-    Evaluation decoding does not emit EOS, so samples run to this cap.
+    So with `vertex_context_size = 17`, evaluation generation emits exactly
+    `8` darts (`17` tokens total including `BOS`).
     """
-    num_reference_edges = int(num_reference_edges)
-    desired_darts = num_reference_edges
+    vertex_context_size = int(vertex_context_size)
+    desired_darts = max(vertex_context_size - 1, 0) // 2
     return max(3, 1 + 2 * desired_darts)
 
 
@@ -376,7 +377,7 @@ def train_model(
     eval_max_length = (
         int(args.eval_max_length)
         if args.eval_max_length is not None
-        else default_face_generation_max_length(int(eval_info["num_reference_edges"]))
+        else default_face_generation_max_length(vertex_context_size)
     )
     print(f"Eval generation max_length: {eval_max_length}")
     history: list[dict[str, float]] = []
@@ -441,7 +442,6 @@ def train_model(
                 num_samples=args.eval_generated_walks,
                 max_length=eval_max_length,
                 bos_token_id=int(eval_info["bos_token_id"]),
-                eos_token_id=int(eval_info["eos_token_id"]),
                 device=device,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",

@@ -376,7 +376,6 @@ def sample_model_walks(
     num_samples: int,
     max_length: int,
     bos_token_id: int,
-    eos_token_id: int | None,
     device,
     batch_size: int = 128,
     show_progress: bool = False,

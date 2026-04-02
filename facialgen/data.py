@@ -359,8 +359,9 @@ class CyclicFaceChunkDataset(Dataset):
 
         dart_stride = (vertex_context_size - 1) // 2
 
-    because ordinary chunked samples contain one `BOS` token plus two vertex
-    tokens per dart. In this non-overlapping regime, the dataset does not
+    when `vertex_context_size` is odd, because ordinary chunked samples contain
+    one `BOS` token plus two vertex tokens per dart. In this non-overlapping
+    regime, the dataset does not
     force an extra overlapping tail chunk; a few darts at the end of a very long
     face may be omitted in a given epoch, but cyclic rotation changes which darts
     are omitted across epochs.
