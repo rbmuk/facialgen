@@ -158,7 +158,7 @@ def default_random_walk_generation_max_length(
 
 
 def build_training_objects(args: argparse.Namespace) -> tuple[
-    CyclicFaceChunkDataset,
+    object,
     torch.utils.data.DataLoader,
     FacialGen,
     dict[str, object],
@@ -210,7 +210,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             num_sign_configs=args.num_sign_configs,
             sign_seed=args.sign_seed,
         )
-        chunk_ds = CyclicFaceChunkDataset(
+        train_ds = CyclicFaceChunkDataset(
             face_ds,
             vertex_context_size=vertex_context_size,
             dart_stride=dart_stride,
@@ -218,8 +218,9 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         )
         bos_token_id = face_ds.bos_token_id
         eos_token_id = face_ds.eos_token_id
-        vocab_size = chunk_ds.pad_token_id + 1
+        vocab_size = train_ds.pad_token_id + 1
         dataset_size_desc = f"Full face sequences: {len(face_ds)}"
+        sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     elif walk_type == "random":
         walk_edge_length = max(vertex_context_size - 2, 1)
         approx_darts_per_sign_config = 2 * ref_num_edges
@@ -227,21 +228,22 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             int(round(args.num_sign_configs * approx_darts_per_sign_config / walk_edge_length)),
             n_lcc,
         )
-        chunk_ds = RandomWalkChunkDataset(
+        train_ds = RandomWalkChunkDataset(
             train_adj,
             num_walks=num_walks,
             vertex_context_size=vertex_context_size,
             epoch_seed=args.epoch_seed,
         )
-        bos_token_id = chunk_ds.bos_token_id
-        eos_token_id = chunk_ds.eos_token_id
-        vocab_size = chunk_ds.pad_token_id + 1
-        dataset_size_desc = f"Random-walk samples: {len(chunk_ds)}"
+        bos_token_id = train_ds.bos_token_id
+        eos_token_id = train_ds.eos_token_id
+        vocab_size = train_ds.pad_token_id + 1
+        dataset_size_desc = f"Random-walk samples: {len(train_ds)}"
+        sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     else:
         raise ValueError(f"Unsupported walk_type={walk_type!r}")
 
     loader = make_face_chunk_dataloader(
-        chunk_ds,
+        train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
@@ -258,7 +260,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             dropout=args.dropout,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
-            pad_token_id=chunk_ds.pad_token_id,
+            pad_token_id=train_ds.pad_token_id,
         )
     )
 
@@ -266,9 +268,9 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     print(f"Walk type: {walk_type}")
     print(f"LCC nodes: {n_lcc}")
     print(dataset_size_desc)
-    print(f"Chunk samples @ T={vertex_context_size}: {len(chunk_ds)}")
-    if hasattr(chunk_ds, "dart_stride"):
-        print(f"Dart stride: {chunk_ds.dart_stride}")
+    print(sample_count_desc)
+    if hasattr(train_ds, "dart_stride"):
+        print(f"Dart stride: {train_ds.dart_stride}")
     print(
         f"Vocab: {vocab_size} "
         f"(vertices + BOS + EOS + PAD)"
@@ -286,7 +288,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "walk_type": walk_type,
     }
 
-    return chunk_ds, loader, model, eval_info
+    return train_ds, loader, model, eval_info
 
 
 def maybe_save_checkpoint(
@@ -418,7 +420,7 @@ def train_model(
         seed_everything(args.seed)
     vertex_context_size = _vertex_context_size_from_args(args)
     device = resolve_device(args.device)
-    chunk_ds, loader, model, eval_info = build_training_objects(args)
+    train_ds, loader, model, eval_info = build_training_objects(args)
     model.to(device)
 
     optimizer = AdamW(
@@ -464,7 +466,8 @@ def train_model(
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
-        chunk_ds.set_epoch(epoch)
+        if hasattr(train_ds, "set_epoch"):
+            train_ds.set_epoch(epoch)
 
         running_loss = 0.0
         running_tokens = 0
