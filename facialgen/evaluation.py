@@ -30,16 +30,30 @@ def transition_count_matrix_from_walks(
     num_nodes: int,
 ) -> sp.csr_matrix:
     """
-    Count consecutive token transitions across generated walks.
+    Count dart transitions across faithful generated walks.
 
     Tokens outside `[0, num_nodes)` are ignored, which lets the function work
     directly with sequences that may contain BOS/EOS/PAD tokens.
+
+    In the faithful vertex encoding, only even-offset vertex pairs correspond
+    to actual darts/edges:
+
+        u0 u1 u2 u0 u3 u2 ...
+
+    encodes darts
+
+        (u0, u1), (u2, u0), (u3, u2), ...
+
+    so pairs like `(u1, u2)` must NOT be counted as edges.
     """
     counts: dict[tuple[int, int], float] = {}
 
     for walk in walks:
         vertices = _extract_valid_vertex_tokens(walk, num_nodes)
-        for u, v in zip(vertices[:-1], vertices[1:]):
+        even_len = len(vertices) - (len(vertices) % 2)
+        for idx in range(0, even_len, 2):
+            u = int(vertices[idx])
+            v = int(vertices[idx + 1])
             if u == v:
                 continue
             counts[(u, v)] = counts.get((u, v), 0.0) + 1.0

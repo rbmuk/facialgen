@@ -14,6 +14,7 @@ from facialgen.evaluation import (
     average_rank_from_graph_statistics,
     compute_graph_statistics,
     reconstruct_graph_from_generated_walks,
+    transition_count_matrix_from_walks,
 )
 
 
@@ -185,6 +186,19 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
 
 
 class EvaluationSmokeTests(unittest.TestCase):
+    def test_transition_counts_use_only_dart_pairs(self) -> None:
+        walks = [
+            [10, 0, 1, 2, 0, 3, 2, 11],  # faithful vertices: darts (0,1), (2,0), (3,2)
+        ]
+
+        S = transition_count_matrix_from_walks(walks, num_nodes=4).toarray()
+
+        self.assertEqual(S[0, 1], 1.0)
+        self.assertEqual(S[2, 0], 1.0)
+        self.assertEqual(S[3, 2], 1.0)
+        self.assertEqual(S[1, 2], 0.0)
+        self.assertEqual(S[0, 3], 0.0)
+
     def test_connected_link_prediction_split_keeps_train_connected(self) -> None:
         A = sp.csr_matrix(
             np.array(
