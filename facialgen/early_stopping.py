@@ -215,8 +215,13 @@ def link_prediction_scores_from_transition_matrix(
     *,
     positive_edges: np.ndarray,
     negative_edges: np.ndarray,
+    walk_type: str = "facial",
 ) -> dict[str, float]:
-    S = symmetrize_transition_scores(S)
+    walk_type = str(walk_type)
+    if walk_type == "random":
+        S = symmetrize_transition_scores(S)
+    elif walk_type != "facial":
+        raise ValueError(f"Unsupported walk_type={walk_type!r}")
     pos_scores = _scores_for_edge_pairs(S, positive_edges)
     neg_scores = _scores_for_edge_pairs(S, negative_edges)
     return {
@@ -245,6 +250,7 @@ def link_prediction_scores_from_walks(
         S,
         positive_edges=positive_edges,
         negative_edges=negative_edges,
+        walk_type=walk_type,
     )
 
 

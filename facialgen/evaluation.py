@@ -94,16 +94,25 @@ def sample_graph_from_scores(
     *,
     target_num_edges: int | None = None,
     seed: int | None = None,
+    walk_type: str = "facial",
 ) -> sp.csr_matrix:
     """
     Convert transition scores to an undirected binary adjacency matrix.
 
     This follows the NetGAN-style post-processing described by the user:
+    For random walks, we follow the NetGAN-style post-processing:
     1. Symmetrize scores with an elementwise max.
     2. Try to give every node at least one edge by row-wise sampling.
     3. Sample the remaining edges without replacement from the global score mass.
+
+    For facial walks, we keep the directed dart counts as-is and only collapse to
+    undirected edges when adding sampled edges to the output graph.
     """
-    S = symmetrize_transition_scores(S)
+    walk_type = str(walk_type)
+    if walk_type == "random":
+        S = symmetrize_transition_scores(S)
+    elif walk_type != "facial":
+        raise ValueError(f"Unsupported walk_type={walk_type!r}")
     n = S.shape[0]
     rng = np.random.default_rng(seed)
 
@@ -208,6 +217,7 @@ def reconstruct_graph_from_generated_walks(
         S,
         target_num_edges=target_num_edges,
         seed=seed,
+        walk_type=walk_type,
     )
     return A_hat, S
 
