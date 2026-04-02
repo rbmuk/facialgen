@@ -8,7 +8,7 @@ import scipy.sparse as sp
 from scipy.sparse.csgraph import breadth_first_tree
 from scipy.stats import rankdata
 
-from .evaluation import symmetrize_transition_scores, transition_count_matrix_from_walks
+from .evaluation import aggregate_transition_scores, transition_count_matrix_from_walks
 
 
 def _to_undirected_simple_csr(A: sp.spmatrix) -> sp.csr_matrix:
@@ -216,12 +216,14 @@ def link_prediction_scores_from_transition_matrix(
     positive_edges: np.ndarray,
     negative_edges: np.ndarray,
     walk_type: str = "facial",
+    score_symmetrization: str | None = None,
 ) -> dict[str, float]:
     walk_type = str(walk_type)
-    if walk_type == "random":
-        S = symmetrize_transition_scores(S)
-    elif walk_type != "facial":
+    if walk_type not in {"random", "facial"}:
         raise ValueError(f"Unsupported walk_type={walk_type!r}")
+    if score_symmetrization is None:
+        score_symmetrization = "sum" if walk_type == "random" else "none"
+    S = aggregate_transition_scores(S, mode=score_symmetrization)
     pos_scores = _scores_for_edge_pairs(S, positive_edges)
     neg_scores = _scores_for_edge_pairs(S, negative_edges)
     return {
@@ -240,6 +242,7 @@ def link_prediction_scores_from_walks(
     positive_edges: np.ndarray,
     negative_edges: np.ndarray,
     walk_type: str = "facial",
+    score_symmetrization: str | None = None,
 ) -> dict[str, float]:
     S = transition_count_matrix_from_walks(
         walks,
@@ -251,6 +254,7 @@ def link_prediction_scores_from_walks(
         positive_edges=positive_edges,
         negative_edges=negative_edges,
         walk_type=walk_type,
+        score_symmetrization=score_symmetrization,
     )
 
 

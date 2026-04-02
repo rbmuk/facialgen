@@ -77,6 +77,12 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-max-length", type=int, default=None)
+    parser.add_argument(
+        "--score-symmetrization",
+        type=str,
+        choices=["max", "sum", "none"],
+        default=None,
+    )
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
     parser.add_argument("--use-link-prediction-split", action="store_true")
     return parser
@@ -307,6 +313,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "eos_token_id": eos_token_id,
         "link_prediction_split": lp_split,
         "walk_type": walk_type,
+        "score_symmetrization": getattr(args, "score_symmetrization", None),
     }
 
     return train_ds, loader, model, eval_info
@@ -472,6 +479,7 @@ def train_model(
         )
 
     walk_type = str(getattr(args, "walk_type", "facial"))
+    score_symmetrization = getattr(args, "score_symmetrization", None)
     default_eval_max_length = (
         default_face_generation_max_length(vertex_context_size)
         if walk_type == "facial"
@@ -562,6 +570,7 @@ def train_model(
                     positive_edges=lp_split["val_edges"],
                     negative_edges=lp_split["val_non_edges"],
                     walk_type=walk_type,
+                    score_symmetrization=score_symmetrization,
                 )
                 val_score = 0.5 * (
                     scores["roc_auc"] + scores["average_precision"]
@@ -580,6 +589,7 @@ def train_model(
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=walk_type,
+                    score_symmetrization=score_symmetrization,
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)
@@ -613,6 +623,7 @@ def train_model(
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=walk_type,
+                    score_symmetrization=score_symmetrization,
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)

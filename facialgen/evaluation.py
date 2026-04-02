@@ -81,9 +81,30 @@ def transition_count_matrix_from_walks(
 
 
 def symmetrize_transition_scores(S: sp.spmatrix) -> sp.csr_matrix:
-    """Symmetrize a directed transition count matrix via elementwise max."""
+    """Symmetrize a directed transition count matrix via directional summation."""
     S = sp.csr_matrix(S, dtype=np.float64)
-    S = S.maximum(S.T)
+    S = S + S.T
+    S.setdiag(0.0)
+    S.eliminate_zeros()
+    return S
+
+
+def aggregate_transition_scores(
+    S: sp.spmatrix,
+    *,
+    mode: str = "sum",
+) -> sp.csr_matrix:
+    """Aggregate directional transition scores into undirected scores."""
+    S = sp.csr_matrix(S, dtype=np.float64)
+    mode = str(mode)
+    if mode == "sum":
+        S = S + S.T
+    elif mode == "max":
+        S = S.maximum(S.T)
+    elif mode == "none":
+        S = S.copy()
+    else:
+        raise ValueError(f"Unsupported score_symmetrization={mode!r}")
     S.setdiag(0.0)
     S.eliminate_zeros()
     return S
@@ -95,13 +116,13 @@ def sample_graph_from_scores(
     target_num_edges: int | None = None,
     seed: int | None = None,
     walk_type: str = "facial",
+    score_symmetrization: str | None = None,
 ) -> sp.csr_matrix:
     """
     Convert transition scores to an undirected binary adjacency matrix.
 
     This follows the NetGAN-style post-processing described by the user:
-    For random walks, we follow the NetGAN-style post-processing:
-    1. Symmetrize scores with an elementwise max.
+    For random walks, we typically aggregate both directions into an undirected score.
     2. Try to give every node at least one edge by row-wise sampling.
     3. Sample the remaining edges without replacement from the global score mass.
 
@@ -109,10 +130,11 @@ def sample_graph_from_scores(
     undirected edges when adding sampled edges to the output graph.
     """
     walk_type = str(walk_type)
-    if walk_type == "random":
-        S = symmetrize_transition_scores(S)
-    elif walk_type != "facial":
+    if walk_type not in {"random", "facial"}:
         raise ValueError(f"Unsupported walk_type={walk_type!r}")
+    if score_symmetrization is None:
+        score_symmetrization = "sum" if walk_type == "random" else "none"
+    S = aggregate_transition_scores(S, mode=score_symmetrization)
     n = S.shape[0]
     rng = np.random.default_rng(seed)
 
@@ -200,6 +222,7 @@ def reconstruct_graph_from_generated_walks(
     target_num_edges: int | None = None,
     seed: int | None = None,
     walk_type: str = "facial",
+    score_symmetrization: str | None = None,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix]:
     """
     Build a synthetic undirected graph from generated walks.
@@ -218,6 +241,7 @@ def reconstruct_graph_from_generated_walks(
         target_num_edges=target_num_edges,
         seed=seed,
         walk_type=walk_type,
+        score_symmetrization=score_symmetrization,
     )
     return A_hat, S
 
