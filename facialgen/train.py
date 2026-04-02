@@ -173,8 +173,20 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     n_lcc = A_lcc.shape[0]
     ref_num_edges = int(sp.triu(A_lcc, k=1).nnz)
 
+    def _edges_to_adj(edges: np.ndarray, shape: tuple[int, int]) -> sp.csr_matrix:
+        if edges.size == 0:
+            return sp.csr_matrix(shape, dtype=np.float64)
+        rows = np.concatenate((edges[:, 0], edges[:, 1]))
+        cols = np.concatenate((edges[:, 1], edges[:, 0]))
+        data = np.ones(rows.shape[0], dtype=np.float64)
+        return sp.coo_matrix((data, (rows, cols)), shape=shape).tocsr()
+
     lp_split = None
     train_adj = A_lcc
+    holdout_adj = sp.csr_matrix(A_lcc.shape, dtype=np.float64)
+    holdout_num_edges = 0
+    overlap_adj = A_lcc
+    overlap_name = "reference"
     if args.early_stop_mode == "val" or args.use_link_prediction_split:
         lp_split = connected_link_prediction_split(
             A_lcc,
@@ -194,6 +206,11 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             f"val_edges={len(lp_split['val_edges'])}, "
             f"test_edges={len(lp_split['test_edges'])}"
         )
+        val_adj = _edges_to_adj(lp_split["val_edges"], A_lcc.shape)
+        holdout_adj = val_adj
+        holdout_num_edges = int(lp_split["val_edges"].shape[0])
+        overlap_adj = val_adj
+        overlap_name = "validation"
 
     curvature = resistance_curvature(
         train_adj,
@@ -278,10 +295,14 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
 
     eval_info: dict[str, object] = {
         "reference_adj": A_lcc,
+        "holdout_adj": holdout_adj,
         "reference_labels": np.asarray(y)[nodes_lcc],
         "train_adj": train_adj,
         "num_nodes": n_lcc,
         "num_reference_edges": ref_num_edges,
+        "num_holdout_edges": holdout_num_edges,
+        "overlap_adj": overlap_adj,
+        "overlap_name": overlap_name,
         "bos_token_id": bos_token_id,
         "eos_token_id": eos_token_id,
         "link_prediction_split": lp_split,
@@ -606,9 +627,11 @@ def train_model(
                     A_hat,
                     reference_labels=eval_info["reference_labels"],
                 )
-                overlap = edge_overlap_ratio(A_hat, eval_info["reference_adj"])
+                overlap_adj = eval_info.get("overlap_adj", eval_info["reference_adj"])
+                overlap_name = str(eval_info.get("overlap_name", "reference"))
+                overlap = edge_overlap_ratio(A_hat, overlap_adj)
                 print(
-                    f"  edge_overlap={overlap:.4f} "
+                    f"  edge_overlap[{overlap_name}]={overlap:.4f} "
                     f"(target={args.target_edge_overlap:.4f})"
                 )
                 epoch_record["edge_overlap"] = float(overlap)
