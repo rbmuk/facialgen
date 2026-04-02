@@ -24,10 +24,10 @@ from .early_stopping import (
     connected_link_prediction_split,
     edge_overlap_ratio,
     link_prediction_scores_from_walks,
-    sample_model_walks,
 )
 from .evaluation import compute_graph_statistics, reconstruct_graph_from_generated_walks
 from .models import FacialGen, FacialGenConfig
+from .sampling import sample_model_walks
 
 
 def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

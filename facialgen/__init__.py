@@ -23,7 +23,6 @@ from .early_stopping import (
     edge_overlap_ratio,
     link_prediction_scores_from_transition_matrix,
     link_prediction_scores_from_walks,
-    sample_model_walks,
 )
 from .evaluation import (
     average_rank_from_graph_statistics,
@@ -42,6 +41,7 @@ from .evaluation import (
     triangle_count,
 )
 from .models import FacialGen, FacialGenConfig
+from .sampling import sample_model_walks
 from .rotation_systems import (
     build_pi_from_rotation,
     build_rotation_from_curvature_signs,
