@@ -25,9 +25,15 @@ from .early_stopping import (
     EarlyStoppingState,
     connected_link_prediction_split,
     edge_overlap_ratio,
+    link_prediction_scores_from_transition_matrix,
     link_prediction_scores_from_walks,
 )
-from .evaluation import compute_graph_statistics, reconstruct_graph_from_generated_walks
+from .evaluation import (
+    compute_graph_statistics,
+    reconstruct_graph_from_generated_walks,
+    reconstruct_graph_from_transition_matrix,
+    transition_count_matrix_from_walks,
+)
 from .models import FacialGen, FacialGenConfig
 from .sampling import sample_model_walks
 
@@ -630,9 +636,13 @@ def train_model(
                 lp_split = eval_info["link_prediction_split"]
                 if lp_split is None:
                     raise RuntimeError("Missing link-prediction split for val criterion.")
-                scores = link_prediction_scores_from_walks(
+                S = transition_count_matrix_from_walks(
                     walks,
                     num_nodes=int(eval_info["num_nodes"]),
+                    walk_type=eval_walk_type,
+                )
+                scores = link_prediction_scores_from_transition_matrix(
+                    S,
                     positive_edges=lp_split["val_edges"],
                     negative_edges=lp_split["val_non_edges"],
                     walk_type=eval_walk_type,
@@ -641,9 +651,8 @@ def train_model(
                 val_score = 0.5 * (
                     scores["roc_auc"] + scores["average_precision"]
                 )
-                A_hat, _ = reconstruct_graph_from_generated_walks(
-                    walks,
-                    num_nodes=int(eval_info["num_nodes"]),
+                A_hat = reconstruct_graph_from_transition_matrix(
+                    S,
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=eval_walk_type,

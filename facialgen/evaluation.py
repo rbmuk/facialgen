@@ -215,6 +215,26 @@ def sample_graph_from_scores(
     return A
 
 
+def reconstruct_graph_from_transition_matrix(
+    S: sp.spmatrix,
+    *,
+    target_num_edges: int | None = None,
+    seed: int | None = None,
+    walk_type: str = "facial",
+    score_symmetrization: str | None = None,
+) -> sp.csr_matrix:
+    """
+    Build a synthetic undirected graph from a precomputed transition matrix.
+    """
+    return sample_graph_from_scores(
+        S,
+        target_num_edges=target_num_edges,
+        seed=seed,
+        walk_type=walk_type,
+        score_symmetrization=score_symmetrization,
+    )
+
+
 def reconstruct_graph_from_generated_walks(
     walks: Iterable[Sequence[int]],
     *,
@@ -236,7 +256,7 @@ def reconstruct_graph_from_generated_walks(
         num_nodes=num_nodes,
         walk_type=walk_type,
     )
-    A_hat = sample_graph_from_scores(
+    A_hat = reconstruct_graph_from_transition_matrix(
         S,
         target_num_edges=target_num_edges,
         seed=seed,
