@@ -601,27 +601,6 @@ def train_model(
                 epoch_record["val_roc_auc"] = float(scores["roc_auc"])
                 epoch_record["val_ap"] = float(scores["average_precision"])
                 epoch_record["val_score"] = float(val_score)
-                A_hat, _ = reconstruct_graph_from_generated_walks(
-                    walks,
-                    num_nodes=int(eval_info["num_nodes"]),
-                    target_num_edges=int(eval_info["num_reference_edges"]),
-                    seed=args.split_seed + epoch,
-                    walk_type=walk_type,
-                    score_symmetrization=score_symmetrization,
-                )
-                ref_num_edges = int(eval_info["num_reference_edges"])
-                gen_num_edges = _num_undirected_edges(A_hat)
-                print(
-                    "  graph_edges: "
-                    f"reference={ref_num_edges} "
-                    f"target={ref_num_edges} "
-                    f"generated={gen_num_edges}"
-                )
-                add_generated_graph_stats_to_epoch_record(
-                    epoch_record,
-                    A_hat,
-                    reference_labels=eval_info["reference_labels"],
-                )
                 should_stop = early_state.update(val_score, step=epoch + 1)
                 history.append(epoch_record)
                 save_history_snapshot(history, args.save_dir)
