@@ -84,6 +84,12 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         default=None,
     )
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
+    parser.add_argument(
+        "--edge-overlap-target",
+        type=str,
+        choices=["validation", "reference"],
+        default="validation",
+    )
     parser.add_argument("--use-link-prediction-split", action="store_true")
     return parser
 
@@ -187,6 +193,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         data = np.ones(rows.shape[0], dtype=np.float64)
         return sp.coo_matrix((data, (rows, cols)), shape=shape).tocsr()
 
+    edge_overlap_target = str(getattr(args, "edge_overlap_target", "validation"))
     lp_split = None
     train_adj = A_lcc
     holdout_adj = sp.csr_matrix(A_lcc.shape, dtype=np.float64)
@@ -215,8 +222,14 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         val_adj = _edges_to_adj(lp_split["val_edges"], A_lcc.shape)
         holdout_adj = val_adj
         holdout_num_edges = int(lp_split["val_edges"].shape[0])
-        overlap_adj = val_adj
-        overlap_name = "validation"
+        if edge_overlap_target == "validation":
+            overlap_adj = val_adj
+            overlap_name = "validation"
+        elif edge_overlap_target == "reference":
+            overlap_adj = A_lcc
+            overlap_name = "reference"
+        else:
+            raise ValueError(f"Unsupported edge_overlap_target={edge_overlap_target!r}")
 
     curvature = resistance_curvature(
         train_adj,
@@ -314,6 +327,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "link_prediction_split": lp_split,
         "walk_type": walk_type,
         "score_symmetrization": getattr(args, "score_symmetrization", None),
+        "edge_overlap_target": edge_overlap_target,
     }
 
     return train_ds, loader, model, eval_info
