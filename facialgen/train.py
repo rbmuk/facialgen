@@ -16,6 +16,7 @@ from .curvature import largest_connected_component, resistance_curvature
 from .data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
+    OnlineFacialWalkChunkDataset,
     RandomWalkChunkDataset,
     load_graph_dataset_sparse,
     make_face_chunk_dataloader,
@@ -47,7 +48,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument(
         "--walk-type",
         type=str,
-        choices=["facial", "random"],
+        choices=["facial", "facial_online", "random"],
         default="facial",
     )
     parser.add_argument("--batch-size", type=int, default=32)
@@ -241,6 +242,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     )
 
     walk_type = getattr(args, "walk_type", "facial")
+    eval_walk_type = "facial" if walk_type == "facial_online" else walk_type
     if walk_type == "facial":
         face_ds = FacialWalkVertexDataset(
             train_adj,
@@ -258,6 +260,19 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         eos_token_id = face_ds.eos_token_id
         vocab_size = train_ds.pad_token_id + 1
         dataset_size_desc = f"Full face sequences: {len(face_ds)}"
+        sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
+    elif walk_type == "facial_online":
+        train_ds = OnlineFacialWalkChunkDataset(
+            train_adj,
+            curvature,
+            vertex_context_size=vertex_context_size,
+            epoch_seed=args.epoch_seed,
+            sign_seed=args.sign_seed,
+        )
+        bos_token_id = train_ds.bos_token_id
+        eos_token_id = train_ds.eos_token_id
+        vocab_size = train_ds.pad_token_id + 1
+        dataset_size_desc = f"Online facial walks per epoch: {len(train_ds.sequences)}"
         sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     elif walk_type == "random":
         walk_edge_length = max(vertex_context_size - 2, 1)
@@ -329,7 +344,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "bos_token_id": bos_token_id,
         "eos_token_id": eos_token_id,
         "link_prediction_split": lp_split,
-        "walk_type": walk_type,
+        "walk_type": eval_walk_type,
         "score_symmetrization": getattr(args, "score_symmetrization", None),
         "edge_overlap_target": edge_overlap_target,
     }
@@ -497,10 +512,11 @@ def train_model(
         )
 
     walk_type = str(getattr(args, "walk_type", "facial"))
+    eval_walk_type = "facial" if walk_type == "facial_online" else walk_type
     score_symmetrization = getattr(args, "score_symmetrization", None)
     default_eval_max_length = (
         default_face_generation_max_length(vertex_context_size)
-        if walk_type == "facial"
+        if eval_walk_type == "facial"
         else default_random_walk_generation_max_length(vertex_context_size)
     )
     eval_max_length = (
@@ -573,7 +589,7 @@ def train_model(
                 max_length=eval_max_length,
                 bos_token_id=int(eval_info["bos_token_id"]),
                 device=device,
-                walk_type=walk_type,
+                walk_type=eval_walk_type,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
@@ -587,7 +603,7 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     positive_edges=lp_split["val_edges"],
                     negative_edges=lp_split["val_non_edges"],
-                    walk_type=walk_type,
+                    walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
                 )
                 val_score = 0.5 * (
@@ -619,7 +635,7 @@ def train_model(
                     num_nodes=int(eval_info["num_nodes"]),
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
-                    walk_type=walk_type,
+                    walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])

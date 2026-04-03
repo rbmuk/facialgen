@@ -8,6 +8,7 @@ import scipy.sparse as sp
 from facialgen.data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
+    OnlineFacialWalkChunkDataset,
     RandomWalkChunkDataset,
 )
 from facialgen.early_stopping import (
@@ -211,6 +212,27 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         self.assertNotEqual(tokens, item_epoch_1["tokens"].tolist())
         self.assertEqual(chunk_ds.second_order_p, 1.0)
         self.assertEqual(chunk_ds.second_order_q, 2.0)
+
+    def test_online_facial_walk_chunk_dataset_rebuilds_each_epoch(self) -> None:
+        A, curvature = toy_graph()
+        chunk_ds = OnlineFacialWalkChunkDataset(
+            A,
+            curvature,
+            vertex_context_size=5,
+            epoch_seed=13,
+            sign_seed=17,
+        )
+
+        self.assertGreater(len(chunk_ds), 0)
+        item0 = chunk_ds[0]
+        self.assertEqual(item0["tokens"][0].item(), chunk_ds.bos_token_id)
+        self.assertLessEqual(int(item0["dart_length"]), chunk_ds.max_darts_per_chunk)
+
+        old_sequences = [seq.copy() for seq in chunk_ds.sequences]
+        chunk_ds.set_epoch(1)
+        self.assertEqual(chunk_ds.epoch, 1)
+        self.assertGreater(len(chunk_ds.sequences), 0)
+        self.assertFalse(all(np.array_equal(a, b) for a, b in zip(old_sequences, chunk_ds.sequences)))
 
 
 class EvaluationSmokeTests(unittest.TestCase):

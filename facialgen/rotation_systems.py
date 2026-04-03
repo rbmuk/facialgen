@@ -160,9 +160,16 @@ def facial_successor(dart: Dart, pi: PiMap) -> Dart:
     return (pi[u][v], u)
 
 
-def enumerate_facial_walks_from_pi(pi: PiMap) -> List[List[Dart]]:
+def enumerate_facial_walks_from_pi(
+    pi: PiMap,
+    *,
+    rng: np.random.Generator | None = None,
+) -> List[List[Dart]]:
     """Enumerate all facial walks from a pi-map."""
     darts = list_all_darts_from_pi(pi)
+    if rng is not None and len(darts) > 1:
+        order = rng.permutation(len(darts))
+        darts = [darts[i] for i in order.tolist()]
 
     visited: set[Dart] = set()
     faces: List[List[Dart]] = []
@@ -188,10 +195,14 @@ def enumerate_facial_walks_from_pi(pi: PiMap) -> List[List[Dart]]:
     return faces
 
 
-def enumerate_facial_walks_from_rotation(rotation: RotationSystem) -> List[List[Dart]]:
+def enumerate_facial_walks_from_rotation(
+    rotation: RotationSystem,
+    *,
+    rng: np.random.Generator | None = None,
+) -> List[List[Dart]]:
     """Enumerate all facial walks from a rotation system."""
     pi = build_pi_from_rotation(rotation)
-    return enumerate_facial_walks_from_pi(pi)
+    return enumerate_facial_walks_from_pi(pi, rng=rng)
 
 
 def dart_face_to_vertex_sequence(face: List[Dart]) -> List[int]:
@@ -232,9 +243,10 @@ def facial_walks_from_pi(
     *,
     return_rotation: bool = False,
     return_vertex_faces: bool = False,
+    rng: np.random.Generator | None = None,
 ):
     """Compute facial walks from a pi-map."""
-    faces = enumerate_facial_walks_from_pi(pi)
+    faces = enumerate_facial_walks_from_pi(pi, rng=rng)
     check_facial_walks_from_pi(pi, faces)
 
     outs = [faces]
@@ -257,6 +269,7 @@ def facial_walks_from_curvature_signs(
     *,
     return_rotation: bool = False,
     return_vertex_faces: bool = False,
+    rng: np.random.Generator | None = None,
 ):
     """Build curvature-sign rotation then compute facial walks."""
     rotation = build_rotation_from_curvature_signs(A, curvature, signs)
@@ -265,6 +278,7 @@ def facial_walks_from_curvature_signs(
         pi,
         return_rotation=return_rotation,
         return_vertex_faces=return_vertex_faces,
+        rng=rng,
     )
 
     if not return_rotation:

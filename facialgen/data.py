@@ -514,6 +514,149 @@ class CyclicFaceChunkDataset(Dataset):
         }
 
 
+class OnlineFacialWalkChunkDataset(Dataset):
+    """
+    One fresh curvature-sign rotation system per epoch with implicit random starts.
+
+    At each epoch we sample one sign configuration, enumerate its facial walks in
+    a random dart order, and chunk each face into BOS-anchored windows of complete
+    darts. Because face enumeration begins from a randomly permuted dart order,
+    the starting dart of each face is already randomized, so no extra cyclic
+    permutation step is applied at retrieval time.
+    """
+
+    def __init__(
+        self,
+        A: sp.spmatrix,
+        curvature: np.ndarray,
+        *,
+        vertex_context_size: int,
+        epoch_seed: int = 0,
+        sign_seed: int = 0,
+        bos_token_id: int | None = None,
+        pad_token_id: int | None = None,
+    ) -> None:
+        _require_torch()
+
+        self.A = sp.csr_matrix(A)
+        self.num_nodes = int(self.A.shape[0])
+        self.curvature = np.asarray(curvature, dtype=float)
+        self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
+        self.max_darts_per_chunk = max((self.vertex_context_size - 1) // 2, 1)
+        self.epoch_seed = int(epoch_seed)
+        self.sign_seed = int(sign_seed)
+        self.epoch = 0
+        self.bos_token_id = self.num_nodes if bos_token_id is None else int(bos_token_id)
+        self.eos_token_id = self.num_nodes + 1
+        self.vocab_size = self.num_nodes + 2
+        self.pad_token_id = self.vocab_size if pad_token_id is None else int(pad_token_id)
+
+        self.signs = np.empty(self.num_nodes, dtype=np.int8)
+        self.sequences: list[np.ndarray] = []
+        self.face_lengths_darts = np.empty(0, dtype=np.int64)
+        self.num_chunks_per_face = np.empty(0, dtype=np.int64)
+        self.chunk_face_index = np.empty(0, dtype=np.int64)
+        self.chunk_index = np.empty(0, dtype=np.int64)
+        self.chunk_start = np.empty(0, dtype=np.int64)
+        self.chunk_to_face: list[tuple[int, int, int]] = []
+        self.set_epoch(0)
+
+    def _sample_epoch_signs(self, epoch: int) -> np.ndarray:
+        rng = np.random.default_rng(self.sign_seed + 1_000_003 * int(epoch))
+        return rng.choice(
+            np.array([-1, 1], dtype=np.int8),
+            size=self.num_nodes,
+            replace=True,
+        )
+
+    def _rebuild_epoch_faces(self) -> None:
+        signs = self._sample_epoch_signs(self.epoch)
+        rng = np.random.default_rng(self.epoch_seed + 1_000_003 * self.epoch)
+        dart_faces = facial_walks_from_curvature_signs(
+            self.A,
+            self.curvature,
+            signs,
+            rng=rng,
+        )
+
+        self.signs = np.asarray(signs, dtype=np.int8)
+        self.sequences = [
+            _dart_face_to_faithful_vertex_sequence(list(face))
+            for face in dart_faces
+        ]
+        self.face_lengths_darts = np.asarray(
+            [len(seq) // 2 for seq in self.sequences],
+            dtype=np.int64,
+        )
+        self.num_chunks_per_face = np.empty(len(self.sequences), dtype=np.int64)
+
+        chunk_face_index: list[int] = []
+        chunk_index: list[int] = []
+        chunk_start: list[int] = []
+        for face_idx, face_length_darts in enumerate(self.face_lengths_darts.tolist()):
+            starts = _window_starts(
+                face_length_darts,
+                self.max_darts_per_chunk,
+                self.max_darts_per_chunk,
+                allow_tail_overlap=False,
+            )
+            self.num_chunks_per_face[face_idx] = len(starts)
+            for local_chunk_idx, start in enumerate(starts):
+                chunk_face_index.append(face_idx)
+                chunk_index.append(local_chunk_idx)
+                chunk_start.append(start)
+
+        self.chunk_face_index = np.asarray(chunk_face_index, dtype=np.int64)
+        self.chunk_index = np.asarray(chunk_index, dtype=np.int64)
+        self.chunk_start = np.asarray(chunk_start, dtype=np.int64)
+        self.chunk_to_face = list(
+            zip(
+                self.chunk_face_index.tolist(),
+                self.chunk_index.tolist(),
+                self.chunk_start.tolist(),
+            )
+        )
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._rebuild_epoch_faces()
+
+    def __len__(self) -> int:
+        return int(self.chunk_face_index.size)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        face_idx = int(self.chunk_face_index[idx])
+        chunk_idx = int(self.chunk_index[idx])
+        start = int(self.chunk_start[idx])
+        face_length_darts = int(self.face_lengths_darts[face_idx])
+        stop = min(start + self.max_darts_per_chunk, face_length_darts)
+        token_length = 2 * (stop - start)
+        token_start = 2 * start
+        vertex_chunk = _slice_cyclic_vertex_window(
+            self.sequences[face_idx],
+            start_token=token_start,
+            token_length=token_length,
+        )
+        chunk = np.empty(vertex_chunk.size + 1, dtype=np.int64)
+        chunk[0] = self.bos_token_id
+        chunk[1:] = vertex_chunk
+
+        return {
+            "tokens": torch.as_tensor(chunk, dtype=torch.long),
+            "face_index": int(face_idx),
+            "chunk_index": int(chunk_idx),
+            "chunk_start": int(start),
+            "dart_length": int(stop - start),
+            "is_terminal": bool(stop == face_length_darts),
+            "has_eos": False,
+            "num_chunks_for_face": int(self.num_chunks_per_face[face_idx]),
+            "sign_config_index": int(self.epoch),
+            "face_index_within_config": int(face_idx),
+            "dart_stride": int(self.max_darts_per_chunk),
+            "stride": int(self.max_darts_per_chunk),
+        }
+
+
 class RandomWalkChunkDataset(Dataset):
     """
     Fixed-length BOS-anchored random walks sampled from a graph.
