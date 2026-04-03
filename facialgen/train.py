@@ -286,6 +286,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         train_ds = OnlineFacialWalkChunkDataset(
             train_adj,
             curvature,
+            num_sign_configs=args.num_sign_configs,
             vertex_context_size=vertex_context_size,
             epoch_seed=args.epoch_seed,
             sign_seed=args.sign_seed,
@@ -293,7 +294,10 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         bos_token_id = train_ds.bos_token_id
         eos_token_id = train_ds.eos_token_id
         vocab_size = train_ds.pad_token_id + 1
-        dataset_size_desc = f"Online facial walks per epoch: {len(train_ds.sequences)}"
+        dataset_size_desc = (
+            f"Online facial walks per epoch: {len(train_ds.sequences)} "
+            f"(from {int(args.num_sign_configs)} sign configs)"
+        )
         sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     elif walk_type == "random":
         walk_edge_length = max(vertex_context_size - 2, 1)

@@ -517,13 +517,14 @@ class CyclicFaceChunkDataset(Dataset):
 
 class OnlineFacialWalkChunkDataset(Dataset):
     """
-    One fresh curvature-sign rotation system per epoch with implicit random starts.
+    Fresh curvature-sign rotation systems per epoch with implicit random starts.
 
-    At each epoch we sample one sign configuration, enumerate its facial walks in
-    a random dart order, and chunk each face into BOS-anchored windows of complete
-    darts. Because face enumeration begins from a randomly permuted dart order,
-    the starting dart of each face is already randomized, so no extra cyclic
-    permutation step is applied at retrieval time.
+    At each epoch we sample `num_sign_configs` sign configurations, enumerate the
+    facial walks for each corresponding rotation system in a random dart order,
+    and chunk every face into BOS-anchored windows of complete darts. Because
+    face enumeration begins from a randomly permuted dart order, the starting
+    dart of each face is already randomized, so no extra cyclic permutation step
+    is applied at retrieval time.
     """
 
     def __init__(
@@ -531,6 +532,7 @@ class OnlineFacialWalkChunkDataset(Dataset):
         A: sp.spmatrix,
         curvature: np.ndarray,
         *,
+        num_sign_configs: int,
         vertex_context_size: int,
         epoch_seed: int = 0,
         sign_seed: int = 0,
@@ -542,6 +544,9 @@ class OnlineFacialWalkChunkDataset(Dataset):
         self.A = sp.csr_matrix(A)
         self.num_nodes = int(self.A.shape[0])
         self.curvature = np.asarray(curvature, dtype=float)
+        self.num_sign_configs = int(num_sign_configs)
+        if self.num_sign_configs <= 0:
+            raise ValueError("num_sign_configs must be positive.")
         self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
         self.max_darts_per_chunk = max((self.vertex_context_size - 1) // 2, 1)
         self.dart_stride = self.max_darts_per_chunk
@@ -554,8 +559,10 @@ class OnlineFacialWalkChunkDataset(Dataset):
         self.vocab_size = self.num_nodes + 2
         self.pad_token_id = self.vocab_size if pad_token_id is None else int(pad_token_id)
 
-        self.signs = np.empty(self.num_nodes, dtype=np.int8)
+        self.signs = np.empty((0, self.num_nodes), dtype=np.int8)
         self.sequences: list[np.ndarray] = []
+        self.sign_config_index = np.empty(0, dtype=np.int64)
+        self.face_index_within_config = np.empty(0, dtype=np.int64)
         self.face_lengths_darts = np.empty(0, dtype=np.int64)
         self.num_chunks_per_face = np.empty(0, dtype=np.int64)
         self.chunk_face_index = np.empty(0, dtype=np.int64)
@@ -565,28 +572,38 @@ class OnlineFacialWalkChunkDataset(Dataset):
         self.set_epoch(0)
 
     def _sample_epoch_signs(self, epoch: int) -> np.ndarray:
-        rng = np.random.default_rng(self.sign_seed + 1_000_003 * int(epoch))
-        return rng.choice(
-            np.array([-1, 1], dtype=np.int8),
-            size=self.num_nodes,
-            replace=True,
+        return _sample_sign_configurations(
+            self.num_sign_configs,
+            self.num_nodes,
+            seed=self.sign_seed + 1_000_003 * int(epoch),
         )
 
     def _rebuild_epoch_faces(self) -> None:
         signs = self._sample_epoch_signs(self.epoch)
-        rng = np.random.default_rng(self.epoch_seed + 1_000_003 * self.epoch)
-        dart_faces = facial_walks_from_curvature_signs(
-            self.A,
-            self.curvature,
-            signs,
-            rng=rng,
-        )
-
         self.signs = np.asarray(signs, dtype=np.int8)
-        self.sequences = [
-            _dart_face_to_faithful_vertex_sequence(list(face))
-            for face in dart_faces
-        ]
+
+        sequences: list[np.ndarray] = []
+        sign_config_index: list[int] = []
+        face_index_within_config: list[int] = []
+
+        for config_idx, sign_vec in enumerate(self.signs):
+            rng = np.random.default_rng(
+                self.epoch_seed + 1_000_003 * self.epoch + 97_003 * config_idx
+            )
+            dart_faces = facial_walks_from_curvature_signs(
+                self.A,
+                self.curvature,
+                sign_vec,
+                rng=rng,
+            )
+            for face_idx, face in enumerate(dart_faces):
+                sequences.append(_dart_face_to_faithful_vertex_sequence(list(face)))
+                sign_config_index.append(config_idx)
+                face_index_within_config.append(face_idx)
+
+        self.sequences = sequences
+        self.sign_config_index = np.asarray(sign_config_index, dtype=np.int64)
+        self.face_index_within_config = np.asarray(face_index_within_config, dtype=np.int64)
         self.face_lengths_darts = np.asarray(
             [len(seq) // 2 for seq in self.sequences],
             dtype=np.int64,
@@ -653,8 +670,8 @@ class OnlineFacialWalkChunkDataset(Dataset):
             "is_terminal": bool(stop == face_length_darts),
             "has_eos": False,
             "num_chunks_for_face": int(self.num_chunks_per_face[face_idx]),
-            "sign_config_index": int(self.epoch),
-            "face_index_within_config": int(face_idx),
+            "sign_config_index": int(self.sign_config_index[face_idx]),
+            "face_index_within_config": int(self.face_index_within_config[face_idx]),
             "dart_stride": int(self.max_darts_per_chunk),
             "stride": int(self.max_darts_per_chunk),
         }

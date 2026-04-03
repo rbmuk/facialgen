@@ -204,12 +204,14 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         chunk_ds = OnlineFacialWalkChunkDataset(
             A,
             curvature,
+            num_sign_configs=3,
             vertex_context_size=5,
             epoch_seed=13,
             sign_seed=17,
         )
 
         self.assertGreater(len(chunk_ds), 0)
+        self.assertGreaterEqual(len(np.unique(chunk_ds.sign_config_index)), 1)
         item0 = chunk_ds[0]
         self.assertEqual(item0["tokens"][0].item(), chunk_ds.bos_token_id)
         self.assertLessEqual(int(item0["dart_length"]), chunk_ds.max_darts_per_chunk)
