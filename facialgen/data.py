@@ -210,6 +210,10 @@ def _csr_neighbor_lists(A: sp.spmatrix) -> list[np.ndarray]:
     ]
 
 
+def _csr_neighbor_sets(A: sp.spmatrix) -> list[set[int]]:
+    return [set(map(int, nbrs.tolist())) for nbrs in _csr_neighbor_lists(A)]
+
+
 def build_face_vertex_sequences(
     A: sp.spmatrix,
     curvature: np.ndarray,
@@ -531,6 +535,8 @@ class RandomWalkChunkDataset(Dataset):
         num_walks: int,
         vertex_context_size: int,
         epoch_seed: int = 0,
+        second_order_p: float = 1.0,
+        second_order_q: float = 1.0,
         bos_token_id: int | None = None,
         pad_token_id: int | None = None,
     ) -> None:
@@ -544,12 +550,17 @@ class RandomWalkChunkDataset(Dataset):
         self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
         self.walk_length = max(self.vertex_context_size - 1, 1)
         self.epoch_seed = int(epoch_seed)
+        self.second_order_p = float(second_order_p)
+        self.second_order_q = float(second_order_q)
+        if self.second_order_p <= 0.0 or self.second_order_q <= 0.0:
+            raise ValueError("second_order_p and second_order_q must be positive.")
         self.epoch = 0
         self.bos_token_id = self.num_nodes if bos_token_id is None else int(bos_token_id)
         self.eos_token_id = self.num_nodes + 1
         self.vocab_size = self.num_nodes + 2
         self.pad_token_id = self.vocab_size if pad_token_id is None else int(pad_token_id)
         self.neighbors = _csr_neighbor_lists(self.A)
+        self.neighbor_sets = _csr_neighbor_sets(self.A)
         if any(len(nbrs) == 0 for nbrs in self.neighbors):
             raise ValueError("Random-walk dataset requires a graph with no isolated nodes.")
 
@@ -565,9 +576,29 @@ class RandomWalkChunkDataset(Dataset):
         verts = np.empty(self.walk_length, dtype=np.int64)
         current = int(rng.integers(0, self.num_nodes))
         verts[0] = current
-        for step in range(1, self.walk_length):
-            nbrs = self.neighbors[current]
-            current = int(nbrs[rng.integers(0, len(nbrs))])
+        if self.walk_length == 1:
+            return verts
+
+        nbrs = self.neighbors[current]
+        current = int(nbrs[rng.integers(0, len(nbrs))])
+        verts[1] = current
+
+        for step in range(2, self.walk_length):
+            prev = int(verts[step - 2])
+            curr = int(verts[step - 1])
+            nbrs = self.neighbors[curr]
+            weights = np.empty(len(nbrs), dtype=np.float64)
+            prev_neighbors = self.neighbor_sets[prev]
+            for j, nxt in enumerate(nbrs.tolist()):
+                nxt = int(nxt)
+                if nxt == prev:
+                    weights[j] = 1.0 / self.second_order_p
+                elif nxt in prev_neighbors:
+                    weights[j] = 1.0
+                else:
+                    weights[j] = 1.0 / self.second_order_q
+            probs = weights / float(weights.sum())
+            current = int(nbrs[rng.choice(len(nbrs), p=probs)])
             verts[step] = current
         return verts
 

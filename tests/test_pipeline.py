@@ -195,6 +195,8 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
             num_walks=8,
             vertex_context_size=6,
             epoch_seed=13,
+            second_order_p=1.0,
+            second_order_q=2.0,
         )
 
         item = chunk_ds[0]
@@ -207,6 +209,8 @@ class FacialWalkDatasetSmokeTests(unittest.TestCase):
         chunk_ds.set_epoch(1)
         item_epoch_1 = chunk_ds[0]
         self.assertNotEqual(tokens, item_epoch_1["tokens"].tolist())
+        self.assertEqual(chunk_ds.second_order_p, 1.0)
+        self.assertEqual(chunk_ds.second_order_q, 2.0)
 
 
 class EvaluationSmokeTests(unittest.TestCase):

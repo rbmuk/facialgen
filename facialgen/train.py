@@ -51,6 +51,8 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         default="facial",
     )
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--second-order-p", type=float, default=1.0)
+    parser.add_argument("--second-order-q", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -269,6 +271,8 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             num_walks=num_walks,
             vertex_context_size=vertex_context_size,
             epoch_seed=args.epoch_seed,
+            second_order_p=args.second_order_p,
+            second_order_q=args.second_order_q,
         )
         bos_token_id = train_ds.bos_token_id
         eos_token_id = train_ds.eos_token_id
