@@ -640,14 +640,35 @@ def train_model(
                 val_score = 0.5 * (
                     scores["roc_auc"] + scores["average_precision"]
                 )
+                A_hat, _ = reconstruct_graph_from_generated_walks(
+                    walks,
+                    num_nodes=int(eval_info["num_nodes"]),
+                    target_num_edges=int(eval_info["num_reference_edges"]),
+                    seed=args.split_seed + epoch,
+                    walk_type=eval_walk_type,
+                    score_symmetrization=score_symmetrization,
+                )
+                reference_overlap = edge_overlap_ratio(A_hat, eval_info["reference_adj"])
+                validation_overlap = None
+                if int(eval_info.get("num_holdout_edges", 0)) > 0:
+                    validation_overlap = edge_overlap_ratio(A_hat, eval_info["holdout_adj"])
                 print(
                     f"  val_roc_auc={scores['roc_auc']:.4f} "
                     f"val_ap={scores['average_precision']:.4f} "
-                    f"val_score={val_score:.4f}"
+                    f"val_score={val_score:.4f} "
+                    f"edge_overlap[reference]={reference_overlap:.4f}"
+                    + (
+                        f" edge_overlap[validation]={validation_overlap:.4f}"
+                        if validation_overlap is not None
+                        else ""
+                    )
                 )
                 epoch_record["val_roc_auc"] = float(scores["roc_auc"])
                 epoch_record["val_ap"] = float(scores["average_precision"])
                 epoch_record["val_score"] = float(val_score)
+                epoch_record["edge_overlap_reference"] = float(reference_overlap)
+                if validation_overlap is not None:
+                    epoch_record["edge_overlap_validation"] = float(validation_overlap)
                 should_stop = early_state.update(val_score, step=epoch + 1)
                 history.append(epoch_record)
                 save_history_snapshot(history, args.save_dir)
