@@ -621,6 +621,7 @@ def train_model(
                 bos_token_id=int(eval_info["bos_token_id"]),
                 device=device,
                 walk_type=eval_walk_type,
+                batch_size=args.batch_size,
                 show_progress=True,
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
