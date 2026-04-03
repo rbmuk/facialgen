@@ -44,7 +44,6 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--sign-seed", type=int, default=2026)
     parser.add_argument("--epoch-seed", type=int, default=99)
     parser.add_argument("--vertex-context-size", type=int, default=32)
-    parser.add_argument("--dart-stride", type=int, default=None)
     parser.add_argument(
         "--walk-type",
         type=str,
@@ -130,14 +129,6 @@ def _vertex_context_size_from_args(args: argparse.Namespace) -> int:
     return int(args.context_size)
 
 
-def _dart_stride_from_args(args: argparse.Namespace) -> int | None:
-    if hasattr(args, "dart_stride"):
-        value = args.dart_stride
-    else:
-        value = getattr(args, "stride", None)
-    return None if value is None else int(value)
-
-
 def default_face_generation_max_length(
     vertex_context_size: int,
 ) -> int:
@@ -172,6 +163,37 @@ def default_random_walk_generation_max_length(
     return max(2, vertex_context_size)
 
 
+def build_run_name(args: argparse.Namespace) -> str:
+    dataset_name = str(getattr(args, "dataset_name", "dataset"))
+    walk_type = str(getattr(args, "walk_type", "walk"))
+    early_stop_mode = str(getattr(args, "early_stop_mode", "none"))
+    stop_tag = {
+        "edge_overlap": "eo",
+        "val": "val",
+        "none": "none",
+    }.get(early_stop_mode, early_stop_mode)
+    return (
+        f"{dataset_name}_{walk_type}_{stop_tag}_"
+        f"L{int(getattr(args, 'n_layer', 0))}_"
+        f"H{int(getattr(args, 'n_head', 0))}_"
+        f"D{int(getattr(args, 'n_embd', 0))}"
+    )
+
+
+def resolve_run_save_dir(
+    save_dir: str | None,
+    args: argparse.Namespace,
+) -> str | None:
+    if save_dir is None:
+        return None
+
+    base_dir = Path(save_dir)
+    run_name = build_run_name(args)
+    if base_dir.name == run_name:
+        return str(base_dir)
+    return str(base_dir / run_name)
+
+
 def build_training_objects(args: argparse.Namespace) -> tuple[
     object,
     torch.utils.data.DataLoader,
@@ -179,7 +201,6 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     dict[str, object],
 ]:
     vertex_context_size = _vertex_context_size_from_args(args)
-    dart_stride = _dart_stride_from_args(args)
     A_full, X, y = load_graph_dataset_sparse(
         args.dataset_name,
         data_dir=args.data_dir,
@@ -253,7 +274,6 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         train_ds = CyclicFaceChunkDataset(
             face_ds,
             vertex_context_size=vertex_context_size,
-            dart_stride=dart_stride,
             epoch_seed=args.epoch_seed,
         )
         bos_token_id = face_ds.bos_token_id
@@ -477,6 +497,7 @@ def _num_undirected_edges(A: sp.spmatrix) -> int:
 def train_model(
     args: argparse.Namespace,
 ) -> tuple[FacialGen, dict[str, object], list[dict[str, float]]]:
+    args.save_dir = resolve_run_save_dir(getattr(args, "save_dir", None), args)
     if hasattr(args, "seed") and args.seed is not None:
         seed_everything(args.seed)
     vertex_context_size = _vertex_context_size_from_args(args)

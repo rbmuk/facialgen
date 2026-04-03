@@ -111,10 +111,13 @@ def _validate_vertex_context_size(vertex_context_size: int) -> int:
     return vertex_context_size
 
 
-def _validate_dart_stride(dart_stride: int) -> int:
-    dart_stride = int(dart_stride)
+def _default_dart_stride(vertex_context_size: int) -> int:
+    vertex_context_size = _validate_vertex_context_size(vertex_context_size)
+    dart_stride = (vertex_context_size - 1) // 2
     if dart_stride <= 0:
-        raise ValueError("dart_stride must be positive.")
+        raise ValueError(
+            "vertex_context_size must be large enough to hold at least one dart after BOS."
+        )
     return dart_stride
 
 
@@ -367,9 +370,10 @@ class CyclicFaceChunkDataset(Dataset):
     where the vertices come from one contiguous dart-window in the rotated
     faithful vertex sequence.
 
-    For non-overlapping coverage in dart space, use
+    For non-overlapping coverage in dart space, the dataset derives its stride
+    automatically as
 
-        dart_stride = (vertex_context_size - 1) // 2
+        (vertex_context_size - 1) // 2
 
     when `vertex_context_size` is odd, because ordinary chunked samples contain
     one `BOS` token plus two vertex tokens per dart. In this non-overlapping
@@ -384,7 +388,6 @@ class CyclicFaceChunkDataset(Dataset):
         face_dataset: FacialWalkVertexDataset,
         *,
         vertex_context_size: int,
-        dart_stride: int | None = None,
         epoch_seed: int = 0,
         pad_token_id: int | None = None,
     ) -> None:
@@ -392,9 +395,7 @@ class CyclicFaceChunkDataset(Dataset):
 
         self.face_dataset = face_dataset
         self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
-        self.dart_stride = _validate_dart_stride(
-            self.vertex_context_size // 2 if dart_stride is None else dart_stride
-        )
+        self.dart_stride = _default_dart_stride(self.vertex_context_size)
         self.context_size = self.vertex_context_size
         self.stride = self.dart_stride
         self.epoch_seed = int(epoch_seed)
@@ -543,6 +544,8 @@ class OnlineFacialWalkChunkDataset(Dataset):
         self.curvature = np.asarray(curvature, dtype=float)
         self.vertex_context_size = _validate_vertex_context_size(vertex_context_size)
         self.max_darts_per_chunk = max((self.vertex_context_size - 1) // 2, 1)
+        self.dart_stride = self.max_darts_per_chunk
+        self.stride = self.dart_stride
         self.epoch_seed = int(epoch_seed)
         self.sign_seed = int(sign_seed)
         self.epoch = 0
