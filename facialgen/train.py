@@ -78,6 +78,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--test-fraction", type=float, default=0.05)
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
+    parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--eval-max-length", type=int, default=None)
     parser.add_argument(
         "--score-symmetrization",
@@ -602,8 +603,13 @@ def train_model(
             "mean_nll": float(epoch_nll),
             "perplexity": float(epoch_ppl),
         }
+        eval_every = max(int(getattr(args, "eval_every", 1)), 1)
+        should_run_eval = (
+            args.early_stop_mode != "none"
+            and ((epoch + 1) % eval_every == 0 or (epoch + 1) == args.epochs)
+        )
 
-        if args.early_stop_mode != "none":
+        if should_run_eval:
             walks = sample_model_walks(
                 model,
                 num_samples=args.eval_generated_walks,
@@ -692,6 +698,10 @@ def train_model(
             else:
                 history.append(epoch_record)
                 save_history_snapshot(history, args.save_dir)
+        elif args.early_stop_mode != "none":
+            epoch_record["eval_skipped"] = 1.0
+            history.append(epoch_record)
+            save_history_snapshot(history, args.save_dir)
         else:
             history.append(epoch_record)
             save_history_snapshot(history, args.save_dir)
