@@ -683,16 +683,15 @@ class OnlineFacialWalkChunkDataset(Dataset):
 
 class RandomWalkChunkDataset(Dataset):
     """
-    Fixed-length BOS-anchored random walks sampled from a graph.
+    Precomputed fixed-length BOS-anchored random walks sampled from a graph.
 
     Each sample has the form
 
         [BOS] v_0 v_1 ... v_{L-1}
 
     where consecutive vertex pairs are actual random-walk transitions in the
-    graph. The walk is re-sampled each epoch from a deterministic epoch/index
-    seed so repeated epochs expose different random walks without storing a huge
-    precomputed corpus.
+    graph. For training efficiency, the walk corpus is sampled once during
+    dataset construction and `__getitem__` simply returns the stored sequence.
     """
 
     def __init__(
@@ -730,15 +729,16 @@ class RandomWalkChunkDataset(Dataset):
         self.neighbor_sets = _csr_neighbor_sets(self.A)
         if any(len(nbrs) == 0 for nbrs in self.neighbors):
             raise ValueError("Random-walk dataset requires a graph with no isolated nodes.")
+        self.tokens = self._build_token_corpus()
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
+        # Random-walk training uses a static precomputed corpus for efficiency.
 
     def __len__(self) -> int:
         return self.num_walks
 
-    def _sample_walk_vertices(self, idx: int) -> np.ndarray:
-        seed = self.epoch_seed + 1_000_003 * self.epoch + 97_003 * int(idx)
+    def _sample_walk_vertices_from_seed(self, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
         verts = np.empty(self.walk_length, dtype=np.int64)
         current = int(rng.integers(0, self.num_nodes))
@@ -769,14 +769,21 @@ class RandomWalkChunkDataset(Dataset):
             verts[step] = current
         return verts
 
+    def _build_token_corpus(self) -> np.ndarray:
+        tokens = np.empty((self.num_walks, self.walk_length + 1), dtype=np.int64)
+        tokens[:, 0] = self.bos_token_id
+        for idx in range(self.num_walks):
+            seed = self.epoch_seed + 97_003 * int(idx)
+            tokens[idx, 1:] = self._sample_walk_vertices_from_seed(seed)
+        return tokens
+
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        vertices = self._sample_walk_vertices(int(idx))
-        tokens = np.empty(vertices.size + 1, dtype=np.int64)
-        tokens[0] = self.bos_token_id
-        tokens[1:] = vertices
+        idx = int(idx)
+        tokens = self.tokens[idx]
+        vertices = tokens[1:]
         return {
             "tokens": torch.as_tensor(tokens, dtype=torch.long),
-            "face_index": int(idx),
+            "face_index": idx,
             "chunk_index": 0,
             "chunk_start": 0,
             "dart_length": int(max(vertices.size - 1, 0)),
@@ -784,7 +791,7 @@ class RandomWalkChunkDataset(Dataset):
             "has_eos": False,
             "num_chunks_for_face": 1,
             "sign_config_index": -1,
-            "face_index_within_config": int(idx),
+            "face_index_within_config": idx,
         }
 
 
