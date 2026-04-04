@@ -88,6 +88,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--test-fraction", type=float, default=0.05)
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
+    parser.add_argument("--eval-generation-batch-size", type=int, default=None)
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--eval-max-length", type=int, default=None)
     parser.add_argument(
@@ -570,7 +571,13 @@ def train_model(
         if args.eval_max_length is not None
         else default_eval_max_length
     )
+    eval_generation_batch_size = (
+        int(args.eval_generation_batch_size)
+        if getattr(args, "eval_generation_batch_size", None) is not None
+        else int(args.batch_size)
+    )
     print(f"Eval generation max_length: {eval_max_length}")
+    print(f"Eval generation batch_size: {eval_generation_batch_size}")
     history: list[dict[str, float]] = load_history_snapshot(args.save_dir)
 
     for epoch in range(start_epoch, args.epochs):
@@ -657,7 +664,7 @@ def train_model(
                 num_nodes=int(eval_info["num_nodes"]),
                 device=device,
                 walk_type=eval_walk_type,
-                batch_size=args.batch_size,
+                batch_size=eval_generation_batch_size,
                 show_progress=(progress_mode == "tqdm"),
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
