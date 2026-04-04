@@ -16,6 +16,51 @@ def _update_transition_counts(
     walk_type: str,
 ) -> None:
     walk_type = str(walk_type)
+    if not sequences:
+        return
+
+    try:
+        arr = np.asarray(sequences, dtype=np.int64)
+    except ValueError:
+        arr = None
+
+    if arr is not None and arr.ndim == 2:
+        if walk_type == "facial":
+            verts = arr[:, 1:]
+            even_len = verts.shape[1] - (verts.shape[1] % 2)
+            if even_len > 0:
+                u = verts[:, :even_len:2].reshape(-1)
+                v = verts[:, 1:even_len:2].reshape(-1)
+                valid = (
+                    (0 <= u) & (u < num_nodes)
+                    & (0 <= v) & (v < num_nodes)
+                    & (u != v)
+                )
+                if np.any(valid):
+                    flat = u[valid] * int(num_nodes) + v[valid]
+                    uniq, freq = np.unique(flat, return_counts=True)
+                    for key, value in zip(uniq.tolist(), freq.tolist()):
+                        edge = (int(key // num_nodes), int(key % num_nodes))
+                        counts[edge] = counts.get(edge, 0.0) + float(value)
+                return
+        elif walk_type == "random":
+            verts = arr[:, 1:]
+            if verts.shape[1] >= 2:
+                u = verts[:, :-1].reshape(-1)
+                v = verts[:, 1:].reshape(-1)
+                valid = (
+                    (0 <= u) & (u < num_nodes)
+                    & (0 <= v) & (v < num_nodes)
+                    & (u != v)
+                )
+                if np.any(valid):
+                    flat = u[valid] * int(num_nodes) + v[valid]
+                    uniq, freq = np.unique(flat, return_counts=True)
+                    for key, value in zip(uniq.tolist(), freq.tolist()):
+                        edge = (int(key // num_nodes), int(key % num_nodes))
+                        counts[edge] = counts.get(edge, 0.0) + float(value)
+                return
+
     for sequence in sequences:
         vertices = [int(v) for v in sequence if 0 <= int(v) < num_nodes]
         if walk_type == "facial":
