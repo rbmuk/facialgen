@@ -40,7 +40,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--dataset-name",
         type=str,
         default="coraml",
-        choices=["coraml", "cora_ml", "citeseer", "polblogs"],
+        choices=["coraml", "cora_ml", "pubmed", "citeseer", "polblogs"],
     )
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--num-sign-configs", type=int, default=8)
@@ -225,6 +225,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     edge_overlap_target = str(getattr(args, "edge_overlap_target", "validation"))
     lp_split = None
     train_adj = A_lcc
+    train_num_edges = ref_num_edges
     holdout_adj = sp.csr_matrix(A_lcc.shape, dtype=np.float64)
     holdout_num_edges = 0
     overlap_adj = A_lcc
@@ -237,6 +238,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             seed=args.split_seed,
         )
         train_adj = lp_split["train_adj"]
+        train_num_edges = int(sp.triu(train_adj, k=1).nnz)
         split_reason = (
             "VAL early stopping"
             if args.early_stop_mode == "val"
@@ -255,8 +257,10 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             overlap_adj = val_adj
             overlap_name = "validation"
         elif edge_overlap_target == "reference":
-            overlap_adj = A_lcc
-            overlap_name = "reference"
+            raise ValueError(
+                "edge_overlap_target='reference' leaks held-out edges when a "
+                "train/val/test split is active. Use 'validation' instead."
+            )
         else:
             raise ValueError(f"Unsupported edge_overlap_target={edge_overlap_target!r}")
 
@@ -305,7 +309,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     elif walk_type == "random":
         walk_edge_length = max(vertex_context_size - 2, 1)
-        approx_darts_per_sign_config = 2 * ref_num_edges
+        approx_darts_per_sign_config = 2 * train_num_edges
         num_walks = max(
             int(round(args.num_sign_configs * approx_darts_per_sign_config / walk_edge_length)),
             n_lcc,
@@ -367,6 +371,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "train_adj": train_adj,
         "num_nodes": n_lcc,
         "num_reference_edges": ref_num_edges,
+        "num_train_edges": train_num_edges,
         "num_holdout_edges": holdout_num_edges,
         "overlap_adj": overlap_adj,
         "overlap_name": overlap_name,
@@ -668,7 +673,7 @@ def train_model(
             elif args.early_stop_mode == "edge_overlap":
                 A_hat = reconstruct_graph_from_transition_matrix(
                     S,
-                    target_num_edges=int(eval_info["num_reference_edges"]),
+                    target_num_edges=int(eval_info["num_train_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
@@ -677,11 +682,12 @@ def train_model(
                     debug=bool(getattr(args, "debug_graph_reconstruction", False)),
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
+                target_num_edges = int(eval_info["num_train_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)
                 print(
                     "  graph_edges: "
                     f"reference={ref_num_edges} "
-                    f"target={ref_num_edges} "
+                    f"target={target_num_edges} "
                     f"generated={gen_num_edges}"
                 )
                 add_generated_graph_stats_to_epoch_record(

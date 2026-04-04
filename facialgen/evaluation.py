@@ -220,7 +220,7 @@ def sample_graph_from_scores(
             fill_pbar = tqdm(
                 total=remaining_target,
                 desc=f"{progress_desc}: edge fill",
-                leave=False,
+                leave=True,
             )
         while len(edges) < target_num_edges and available_edges:
             weights = np.asarray([weight_map[e] for e in available_edges], dtype=np.float64)
