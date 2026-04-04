@@ -63,7 +63,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument(
+    parser.add_argument( #???
         "--progress-mode",
         type=str,
         choices=["tqdm", "log"],
