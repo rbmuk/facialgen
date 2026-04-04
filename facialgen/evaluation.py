@@ -214,26 +214,33 @@ def sample_graph_from_scores(
         )
     if available_edges and len(edges) < target_num_edges:
         weight_map = {edge: weight for edge, weight in zip(all_edges, all_weights)}
-        remaining_target = max(target_num_edges - len(edges), 0)
-        fill_pbar = None
-        if show_progress:
-            fill_pbar = tqdm(
-                total=remaining_target,
-                desc=f"{progress_desc}: edge fill",
-                leave=True,
-            )
-        while len(edges) < target_num_edges and available_edges:
+        remaining_target = min(
+            max(target_num_edges - len(edges), 0),
+            len(available_edges),
+        )
+        if remaining_target > 0:
             weights = np.asarray([weight_map[e] for e in available_edges], dtype=np.float64)
             total = float(weights.sum())
-            if total <= 0:
-                break
-            probs = weights / total
-            idx = int(rng.choice(len(available_edges), p=probs))
-            edges.add(available_edges.pop(idx))
-            if fill_pbar is not None:
-                fill_pbar.update(1)
-        if fill_pbar is not None:
-            fill_pbar.close()
+            if total > 0:
+                probs = weights / total
+                if show_progress:
+                    fill_pbar = tqdm(
+                        total=1,
+                        desc=f"{progress_desc}: edge fill",
+                        leave=True,
+                    )
+                sampled_idx = rng.choice(
+                    len(available_edges),
+                    size=remaining_target,
+                    replace=False,
+                    p=probs,
+                )
+                sampled_idx = np.atleast_1d(sampled_idx).astype(np.int64, copy=False)
+                for idx in sampled_idx.tolist():
+                    edges.add(available_edges[int(idx)])
+                if show_progress:
+                    fill_pbar.update(1)
+                    fill_pbar.close()
     if debug:
         print(f"[{progress_desc}] finished with {len(edges)} undirected edges")
 
