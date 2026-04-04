@@ -26,15 +26,13 @@ from .early_stopping import (
     connected_link_prediction_split,
     edge_overlap_ratio,
     link_prediction_scores_from_transition_matrix,
-    link_prediction_scores_from_walks,
 )
 from .evaluation import (
     compute_graph_statistics,
-    reconstruct_graph_from_generated_walks,
-    transition_count_matrix_from_walks,
+    reconstruct_graph_from_transition_matrix,
 )
 from .models import FacialGen, FacialGenConfig
-from .sampling import sample_model_walks
+from .sampling import sample_model_transition_counts
 
 
 def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -91,6 +89,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         choices=["max", "sum", "none"],
         default=None,
     )
+    parser.add_argument("--debug-graph-reconstruction", action="store_true")
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
     parser.add_argument(
         "--edge-overlap-target",
@@ -619,11 +618,12 @@ def train_model(
         )
 
         if should_run_eval:
-            walks = sample_model_walks(
+            S = sample_model_transition_counts(
                 model,
                 num_samples=args.eval_generated_walks,
                 max_length=eval_max_length,
                 bos_token_id=int(eval_info["bos_token_id"]),
+                num_nodes=int(eval_info["num_nodes"]),
                 device=device,
                 walk_type=eval_walk_type,
                 batch_size=args.batch_size,
@@ -635,11 +635,6 @@ def train_model(
                 lp_split = eval_info["link_prediction_split"]
                 if lp_split is None:
                     raise RuntimeError("Missing link-prediction split for val criterion.")
-                S = transition_count_matrix_from_walks(
-                    walks,
-                    num_nodes=int(eval_info["num_nodes"]),
-                    walk_type=eval_walk_type,
-                )
                 scores = link_prediction_scores_from_transition_matrix(
                     S,
                     positive_edges=lp_split["val_edges"],
@@ -671,13 +666,15 @@ def train_model(
                     break
 
             elif args.early_stop_mode == "edge_overlap":
-                A_hat, _ = reconstruct_graph_from_generated_walks(
-                    walks,
-                    num_nodes=int(eval_info["num_nodes"]),
+                A_hat = reconstruct_graph_from_transition_matrix(
+                    S,
                     target_num_edges=int(eval_info["num_reference_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
+                    show_progress=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
+                    debug=bool(getattr(args, "debug_graph_reconstruction", False)),
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 gen_num_edges = _num_undirected_edges(A_hat)

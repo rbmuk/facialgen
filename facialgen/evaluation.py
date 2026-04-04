@@ -5,6 +5,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components, shortest_path
+from tqdm.auto import tqdm
 
 
 def _to_undirected_simple_csr(A: sp.spmatrix) -> sp.csr_matrix:
@@ -117,6 +118,9 @@ def sample_graph_from_scores(
     seed: int | None = None,
     walk_type: str = "facial",
     score_symmetrization: str | None = None,
+    show_progress: bool = False,
+    progress_desc: str = "graph reconstruction",
+    debug: bool = False,
 ) -> sp.csr_matrix:
     """
     Convert transition scores to an undirected binary adjacency matrix.
@@ -134,6 +138,11 @@ def sample_graph_from_scores(
         raise ValueError(f"Unsupported walk_type={walk_type!r}")
     if score_symmetrization is None:
         score_symmetrization = "sum" if walk_type == "random" else "none"
+    if debug:
+        print(
+            f"[{progress_desc}] aggregating scores "
+            f"(mode={score_symmetrization}, walk_type={walk_type})"
+        )
     S = aggregate_transition_scores(S, mode=score_symmetrization)
     n = S.shape[0]
     rng = np.random.default_rng(seed)
@@ -144,7 +153,15 @@ def sample_graph_from_scores(
 
     # Step 1: ensure each node has at least one incident edge whenever possible
     # by row-wise sampling proportional to the symmetrized transition scores.
-    for i in range(n):
+    row_iter = range(n)
+    if show_progress:
+        row_iter = tqdm(
+            row_iter,
+            total=n,
+            desc=f"{progress_desc}: row seeding",
+            leave=False,
+        )
+    for i in row_iter:
         row_start, row_stop = S.indptr[i], S.indptr[i + 1]
         nbrs = S.indices[row_start:row_stop]
         vals = S.data[row_start:row_stop]
@@ -173,6 +190,8 @@ def sample_graph_from_scores(
         probs = weights / total
         idx = int(rng.choice(len(candidate_edges), p=probs))
         edges.add(candidate_edges[idx])
+    if debug:
+        print(f"[{progress_desc}] row seeding selected {len(edges)} edges")
 
     # Step 2: global edge sampling without replacement until target edge count.
     upper = sp.triu(S, k=1).tocoo()
@@ -188,8 +207,21 @@ def sample_graph_from_scores(
         edge for edge in all_edges
         if edge not in edges
     ]
+    if debug:
+        print(
+            f"[{progress_desc}] global fill from {len(available_edges)} candidate edges "
+            f"toward target={target_num_edges}"
+        )
     if available_edges and len(edges) < target_num_edges:
         weight_map = {edge: weight for edge, weight in zip(all_edges, all_weights)}
+        remaining_target = max(target_num_edges - len(edges), 0)
+        fill_pbar = None
+        if show_progress:
+            fill_pbar = tqdm(
+                total=remaining_target,
+                desc=f"{progress_desc}: edge fill",
+                leave=False,
+            )
         while len(edges) < target_num_edges and available_edges:
             weights = np.asarray([weight_map[e] for e in available_edges], dtype=np.float64)
             total = float(weights.sum())
@@ -198,6 +230,12 @@ def sample_graph_from_scores(
             probs = weights / total
             idx = int(rng.choice(len(available_edges), p=probs))
             edges.add(available_edges.pop(idx))
+            if fill_pbar is not None:
+                fill_pbar.update(1)
+        if fill_pbar is not None:
+            fill_pbar.close()
+    if debug:
+        print(f"[{progress_desc}] finished with {len(edges)} undirected edges")
 
     if not edges:
         return sp.csr_matrix((n, n), dtype=np.float64)
@@ -222,6 +260,9 @@ def reconstruct_graph_from_transition_matrix(
     seed: int | None = None,
     walk_type: str = "facial",
     score_symmetrization: str | None = None,
+    show_progress: bool = False,
+    progress_desc: str = "graph reconstruction",
+    debug: bool = False,
 ) -> sp.csr_matrix:
     """
     Build a synthetic undirected graph from a precomputed transition matrix.
@@ -232,6 +273,9 @@ def reconstruct_graph_from_transition_matrix(
         seed=seed,
         walk_type=walk_type,
         score_symmetrization=score_symmetrization,
+        show_progress=show_progress,
+        progress_desc=progress_desc,
+        debug=debug,
     )
 
 
@@ -243,6 +287,9 @@ def reconstruct_graph_from_generated_walks(
     seed: int | None = None,
     walk_type: str = "facial",
     score_symmetrization: str | None = None,
+    show_progress: bool = False,
+    progress_desc: str = "graph reconstruction",
+    debug: bool = False,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix]:
     """
     Build a synthetic undirected graph from generated walks.
@@ -262,6 +309,9 @@ def reconstruct_graph_from_generated_walks(
         seed=seed,
         walk_type=walk_type,
         score_symmetrization=score_symmetrization,
+        show_progress=show_progress,
+        progress_desc=progress_desc,
+        debug=debug,
     )
     return A_hat, S
 

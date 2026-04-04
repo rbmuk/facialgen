@@ -1,6 +1,50 @@
 from __future__ import annotations
 
 import numpy as np
+import scipy.sparse as sp
+
+
+def _update_transition_counts(
+    counts: dict[tuple[int, int], float],
+    sequences: list[list[int]],
+    *,
+    num_nodes: int,
+    walk_type: str,
+) -> None:
+    walk_type = str(walk_type)
+    for sequence in sequences:
+        vertices = [int(v) for v in sequence if 0 <= int(v) < num_nodes]
+        if walk_type == "facial":
+            even_len = len(vertices) - (len(vertices) % 2)
+            for idx in range(0, even_len, 2):
+                u = int(vertices[idx])
+                v = int(vertices[idx + 1])
+                if u == v:
+                    continue
+                counts[(u, v)] = counts.get((u, v), 0.0) + 1.0
+        elif walk_type == "random":
+            for idx in range(0, max(len(vertices) - 1, 0)):
+                u = int(vertices[idx])
+                v = int(vertices[idx + 1])
+                if u == v:
+                    continue
+                counts[(u, v)] = counts.get((u, v), 0.0) + 1.0
+        else:
+            raise ValueError(f"Unsupported walk_type={walk_type!r}")
+
+
+def _counts_dict_to_csr(
+    counts: dict[tuple[int, int], float],
+    *,
+    num_nodes: int,
+) -> sp.csr_matrix:
+    if not counts:
+        return sp.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
+
+    rows = np.fromiter((k[0] for k in counts.keys()), dtype=np.int64)
+    cols = np.fromiter((k[1] for k in counts.keys()), dtype=np.int64)
+    vals = np.fromiter(counts.values(), dtype=np.float64)
+    return sp.coo_matrix((vals, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
 def _sample_constrained_facial_batch(
@@ -273,3 +317,83 @@ def sample_model_walks(
 
     pbar.close()
     return walks
+
+
+def sample_model_transition_counts(
+    model,
+    *,
+    num_samples: int,
+    max_length: int,
+    bos_token_id: int,
+    num_nodes: int,
+    device,
+    walk_type: str = "facial",
+    batch_size: int = 128,
+    show_progress: bool = False,
+    progress_desc: str = "sampling walks",
+) -> sp.csr_matrix:
+    """
+    Sample token sequences batch-by-batch and accumulate the transition count
+    matrix directly, without retaining all sampled walks in memory.
+    """
+    import torch
+    from tqdm.auto import tqdm
+
+    model.eval()
+    remaining = int(num_samples)
+    walk_type = str(walk_type)
+    hf_config = getattr(model, "hf_config", None)
+    model_block_size = int(
+        getattr(getattr(model, "config", None), "block_size", 0)
+        or getattr(hf_config, "max_position_embeddings", 0)
+        or max_length
+    )
+    pad_token_id = int(
+        getattr(getattr(model, "config", None), "pad_token_id", -1)
+        if getattr(getattr(model, "config", None), "pad_token_id", None) is not None
+        else getattr(hf_config, "pad_token_id", bos_token_id)
+    )
+    counts: dict[tuple[int, int], float] = {}
+    pbar = tqdm(
+        total=remaining,
+        desc=progress_desc,
+        disable=not show_progress,
+        unit="walk",
+    )
+
+    with torch.inference_mode():
+        while remaining > 0:
+            cur_batch = min(batch_size, remaining)
+            if walk_type == "facial":
+                sequences = _sample_constrained_facial_batch(
+                    model,
+                    batch_size=cur_batch,
+                    max_length=max_length,
+                    bos_token_id=bos_token_id,
+                    pad_token_id=pad_token_id,
+                    model_block_size=model_block_size,
+                    device=device,
+                )
+            elif walk_type == "random":
+                sequences = _sample_random_walk_batch(
+                    model,
+                    batch_size=cur_batch,
+                    max_length=max_length,
+                    bos_token_id=bos_token_id,
+                    pad_token_id=pad_token_id,
+                    model_block_size=model_block_size,
+                    device=device,
+                )
+            else:
+                raise ValueError(f"Unsupported walk_type={walk_type!r}")
+            _update_transition_counts(
+                counts,
+                sequences,
+                num_nodes=num_nodes,
+                walk_type=walk_type,
+            )
+            remaining -= cur_batch
+            pbar.update(cur_batch)
+
+    pbar.close()
+    return _counts_dict_to_csr(counts, num_nodes=num_nodes)
