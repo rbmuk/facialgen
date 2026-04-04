@@ -63,6 +63,12 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--progress-mode",
+        type=str,
+        choices=["tqdm", "log"],
+        default="tqdm",
+    )
     parser.add_argument("--n-layer", type=int, default=4)
     parser.add_argument("--n-head", type=int, default=4)
     parser.add_argument("--n-embd", type=int, default=256)
@@ -541,6 +547,7 @@ def train_model(
         f"Model config: layers={args.n_layer}, heads={args.n_head}, "
         f"embd={args.n_embd}, dropout={args.dropout}"
     )
+    progress_mode = str(getattr(args, "progress_mode", "tqdm"))
 
     early_state = None
     if args.early_stop_mode == "val":
@@ -573,9 +580,13 @@ def train_model(
 
         running_loss = 0.0
         running_tokens = 0
-        pbar = tqdm(loader, desc=f"epoch {epoch + 1}/{args.epochs}")
+        if progress_mode == "tqdm":
+            batch_iter = tqdm(loader, desc=f"epoch {epoch + 1}/{args.epochs}")
+        else:
+            print(f"epoch {epoch + 1}/{args.epochs}: training")
+            batch_iter = loader
 
-        for step, batch in enumerate(pbar, start=1):
+        for step, batch in enumerate(batch_iter, start=1):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
@@ -603,10 +614,16 @@ def train_model(
             if step % args.log_every == 0 or step == len(loader):
                 mean_nll = running_loss / max(running_tokens, 1)
                 perplexity = math.exp(mean_nll) if mean_nll < 20 else float("inf")
-                pbar.set_postfix(
-                    loss=f"{mean_nll:.4f}",
-                    ppl=f"{perplexity:.2f}",
-                )
+                if progress_mode == "tqdm":
+                    batch_iter.set_postfix(
+                        loss=f"{mean_nll:.4f}",
+                        ppl=f"{perplexity:.2f}",
+                    )
+                else:
+                    print(
+                        f"  step {step}/{len(loader)} "
+                        f"mean_nll={mean_nll:.4f} ppl={perplexity:.2f}"
+                    )
 
         epoch_nll = running_loss / max(running_tokens, 1)
         epoch_ppl = math.exp(epoch_nll) if epoch_nll < 20 else float("inf")
@@ -627,6 +644,11 @@ def train_model(
         )
 
         if should_run_eval:
+            if progress_mode == "log":
+                print(
+                    f"epoch {epoch + 1}/{args.epochs}: eval sampling "
+                    f"({args.eval_generated_walks} samples)"
+                )
             S = sample_model_transition_counts(
                 model,
                 num_samples=args.eval_generated_walks,
@@ -636,11 +658,13 @@ def train_model(
                 device=device,
                 walk_type=eval_walk_type,
                 batch_size=args.batch_size,
-                show_progress=True,
+                show_progress=(progress_mode == "tqdm"),
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
             )
 
             if args.early_stop_mode == "val":
+                if progress_mode == "log":
+                    print(f"epoch {epoch + 1}/{args.epochs}: graph reconstruction")
                 lp_split = eval_info["link_prediction_split"]
                 if lp_split is None:
                     raise RuntimeError("Missing link-prediction split for val criterion.")
@@ -650,9 +674,15 @@ def train_model(
                     seed=args.split_seed + epoch,
                     walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
-                    show_progress=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    show_progress=(
+                        progress_mode == "tqdm"
+                        and bool(getattr(args, "debug_graph_reconstruction", False))
+                    ),
                     progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
-                    debug=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    debug=(
+                        progress_mode == "log"
+                        or bool(getattr(args, "debug_graph_reconstruction", False))
+                    ),
                 )
                 scores = link_prediction_scores_from_transition_matrix(
                     S,
@@ -690,15 +720,23 @@ def train_model(
                     break
 
             elif args.early_stop_mode == "edge_overlap":
+                if progress_mode == "log":
+                    print(f"epoch {epoch + 1}/{args.epochs}: graph reconstruction")
                 A_hat = reconstruct_graph_from_transition_matrix(
                     S,
                     target_num_edges=int(eval_info["num_train_edges"]),
                     seed=args.split_seed + epoch,
                     walk_type=eval_walk_type,
                     score_symmetrization=score_symmetrization,
-                    show_progress=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    show_progress=(
+                        progress_mode == "tqdm"
+                        and bool(getattr(args, "debug_graph_reconstruction", False))
+                    ),
                     progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
-                    debug=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    debug=(
+                        progress_mode == "log"
+                        or bool(getattr(args, "debug_graph_reconstruction", False))
+                    ),
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
                 target_num_edges = int(eval_info["num_train_edges"])

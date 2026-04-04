@@ -145,8 +145,14 @@ def run_final_evaluation(
     generated_stats_rows: list[dict[str, float | None]] = []
     split_score_tables: list[pd.DataFrame] = []
     darts_per_sequence = max((int(final_max_length) - 1) // 2, 1) if eval_walk_type == "facial" else max(int(final_max_length) - 1, 1)
+    progress_mode = str(getattr(args, "progress_mode", "tqdm"))
 
     for graph_idx in range(int(args.num_generated_graphs)):
+        if progress_mode == "log":
+            print(
+                f"final graph {graph_idx + 1}/{args.num_generated_graphs}: "
+                f"sampling {int(args.final_generated_walks)} walks"
+            )
         S = sample_model_transition_counts(
             model,
             num_samples=int(args.final_generated_walks),
@@ -156,19 +162,27 @@ def run_final_evaluation(
             device=device,
             walk_type=eval_walk_type,
             batch_size=int(args.generation_batch_size),
-            show_progress=True,
+            show_progress=(progress_mode == "tqdm"),
             progress_desc=f"final sampling graph {graph_idx + 1}/{args.num_generated_graphs}",
         )
 
+        if progress_mode == "log":
+            print(f"final graph {graph_idx + 1}/{args.num_generated_graphs}: graph reconstruction")
         A_hat = reconstruct_graph_from_transition_matrix(
             S,
             target_num_edges=num_reference_edges,
             seed=int(args.reconstruction_seed) + graph_idx,
             walk_type=eval_walk_type,
             score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
-            show_progress=bool(getattr(args, "debug_graph_reconstruction", False)),
+            show_progress=(
+                progress_mode == "tqdm"
+                and bool(getattr(args, "debug_graph_reconstruction", False))
+            ),
             progress_desc=f"graph reconstruction {graph_idx + 1}/{args.num_generated_graphs}",
-            debug=bool(getattr(args, "debug_graph_reconstruction", False)),
+            debug=(
+                progress_mode == "log"
+                or bool(getattr(args, "debug_graph_reconstruction", False))
+            ),
         )
 
         train_upper = sp.triu(eval_info["train_adj"], k=1).tocoo()
