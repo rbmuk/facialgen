@@ -66,6 +66,49 @@ def _load_latest_checkpoint(run_dir: Path) -> tuple[FacialGen, Path]:
     return FacialGen.from_pretrained(str(ckpt_dir)), ckpt_dir
 
 
+def _best_val_epoch_from_history(history: list[dict[str, float]]) -> int | None:
+    best_epoch: int | None = None
+    best_score: float | None = None
+    for row in history:
+        try:
+            score = float(row.get("val_score", float("nan")))
+            epoch = int(row.get("epoch", 0))
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(score) or epoch <= 0:
+            continue
+        if best_score is None or score > best_score:
+            best_score = score
+            best_epoch = epoch
+    return best_epoch
+
+
+def _load_best_val_checkpoint(
+    run_dir: Path,
+    history: list[dict[str, float]],
+) -> tuple[FacialGen, Path] | None:
+    best_epoch = _best_val_epoch_from_history(history)
+    if best_epoch is None:
+        return None
+    ckpt_dir = run_dir / f"epoch_{best_epoch:03d}"
+    if not ckpt_dir.exists():
+        return None
+    return FacialGen.from_pretrained(str(ckpt_dir)), ckpt_dir
+
+
+def _load_eval_checkpoint(
+    run_dir: Path,
+    history: list[dict[str, float]],
+    *,
+    prefer_best_val: bool,
+) -> tuple[FacialGen, Path]:
+    if prefer_best_val:
+        best = _load_best_val_checkpoint(run_dir, history)
+        if best is not None:
+            return best
+    return _load_latest_checkpoint(run_dir)
+
+
 def _load_history(run_dir: Path) -> list[dict[str, float]]:
     history_path = run_dir / "history.json"
     if not history_path.exists():
@@ -305,18 +348,31 @@ def main() -> None:
         if args.save_dir is None:
             raise RuntimeError("--skip-train requires a save_dir with an existing run.")
         run_dir = Path(args.save_dir)
-        model, checkpoint_dir = _load_latest_checkpoint(run_dir)
         history = _load_history(run_dir)
+        model, checkpoint_dir = _load_eval_checkpoint(
+            run_dir,
+            history,
+            prefer_best_val=(str(args.early_stop_mode) == "val"),
+        )
         train_args_path = run_dir / "train_args.json"
         if train_args_path.exists():
-            print(f"loaded latest checkpoint from {checkpoint_dir}")
+            print(f"loaded evaluation checkpoint from {checkpoint_dir}")
         from facialgen.train import build_training_objects
 
         _, _, _, eval_info = build_training_objects(args)
     else:
         model, eval_info, history = train_model(args)
         if args.save_dir is not None:
-            checkpoint_dir = Path(args.save_dir) / "final"
+            run_dir = Path(args.save_dir)
+            if str(args.early_stop_mode) == "val":
+                model, checkpoint_dir = _load_eval_checkpoint(
+                    run_dir,
+                    history,
+                    prefer_best_val=True,
+                )
+                print(f"reloaded best validation checkpoint from {checkpoint_dir}")
+            else:
+                checkpoint_dir = run_dir / "final"
 
     print(f"\nhistory rows: {len(history)}")
     run_final_evaluation(
