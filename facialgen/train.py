@@ -667,6 +667,11 @@ def train_model(
                 batch_size=eval_generation_batch_size,
                 show_progress=(progress_mode == "tqdm"),
                 progress_desc=f"eval sampling @ epoch {epoch + 1}",
+                log_every_samples=(
+                    max(int(args.eval_generated_walks) // 10, 1)
+                    if progress_mode == "log"
+                    else None
+                ),
             )
 
             if args.early_stop_mode == "val":

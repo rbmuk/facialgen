@@ -164,6 +164,11 @@ def run_final_evaluation(
             batch_size=int(args.generation_batch_size),
             show_progress=(progress_mode == "tqdm"),
             progress_desc=f"final sampling graph {graph_idx + 1}/{args.num_generated_graphs}",
+            log_every_samples=(
+                max(int(args.final_generated_walks) // 10, 1)
+                if progress_mode == "log"
+                else None
+            ),
         )
 
         if progress_mode == "log":

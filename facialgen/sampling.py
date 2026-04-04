@@ -4,6 +4,10 @@ import numpy as np
 import scipy.sparse as sp
 
 
+def _get_hf_causal_lm(model):
+    return getattr(model, "model", None)
+
+
 def _update_transition_counts(
     counts: dict[tuple[int, int], float],
     sequences: list[list[int]],
@@ -48,6 +52,122 @@ def _counts_dict_to_csr(
 
 
 def _sample_constrained_facial_batch(
+    model,
+    *,
+    batch_size: int,
+    max_length: int,
+    bos_token_id: int,
+    pad_token_id: int,
+    model_block_size: int,
+    device,
+) -> list[list[int]]:
+    import torch
+
+    hf_model = _get_hf_causal_lm(model)
+    if hf_model is None or max_length > model_block_size:
+        return _sample_constrained_facial_batch_legacy(
+            model,
+            batch_size=batch_size,
+            max_length=max_length,
+            bos_token_id=bos_token_id,
+            pad_token_id=pad_token_id,
+            model_block_size=model_block_size,
+            device=device,
+        )
+
+    sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(batch_size)]
+    sampled_vertices: list[list[int]] = [[] for _ in range(batch_size)]
+    pending_copy = np.zeros(batch_size, dtype=bool)
+    finished = np.zeros(batch_size, dtype=bool)
+
+    input_ids = torch.full(
+        (batch_size, 1),
+        fill_value=int(bos_token_id),
+        dtype=torch.long,
+        device=device,
+    )
+    outputs = hf_model(
+        input_ids=input_ids,
+        use_cache=True,
+        return_dict=True,
+    )
+    past_key_values = outputs.past_key_values
+    next_token_logits = outputs.logits[:, -1, :]
+
+    while not np.all(finished):
+        need_model_rows = np.flatnonzero(~finished & ~pending_copy)
+        if need_model_rows.size > 0:
+            masked_logits = next_token_logits[need_model_rows].clone()
+
+            # Only vertex ids are valid generation targets during evaluation.
+            # We intentionally disallow EOS here so every sampled sequence grows
+            # to the requested cap.
+            masked_logits[:, bos_token_id:] = -float("inf")
+            for batch_row, row_idx in enumerate(need_model_rows.tolist()):
+                verts = sampled_vertices[row_idx]
+                if not verts:
+                    continue
+                if len(verts) <= 2:
+                    partner = int(verts[0])
+                else:
+                    partner = int(verts[-1])
+                if 0 <= partner < bos_token_id:
+                    masked_logits[batch_row, partner] = -float("inf")
+
+            probs = torch.softmax(masked_logits, dim=-1)
+            sampled_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        else:
+            sampled_tokens = None
+
+        step_tokens = torch.full(
+            (batch_size,),
+            fill_value=int(pad_token_id),
+            dtype=torch.long,
+            device=device,
+        )
+        active_any = False
+
+        for batch_row, row_idx in enumerate(need_model_rows.tolist()):
+            token = int(sampled_tokens[batch_row].item())
+            sequences[row_idx].append(token)
+            sampled_vertices[row_idx].append(token)
+            step_tokens[row_idx] = token
+            active_any = True
+
+            if len(sampled_vertices[row_idx]) >= 3:
+                pending_copy[row_idx] = True
+            if len(sequences[row_idx]) >= max_length:
+                finished[row_idx] = True
+                pending_copy[row_idx] = False
+
+        copy_rows = np.flatnonzero(~finished & pending_copy)
+        for row_idx in copy_rows.tolist():
+            verts = sampled_vertices[row_idx]
+            copied = verts[0] if len(verts) == 3 else verts[-2]
+            sequences[row_idx].append(int(copied))
+            step_tokens[row_idx] = int(copied)
+            pending_copy[row_idx] = False
+            active_any = True
+
+            if len(sequences[row_idx]) >= max_length:
+                finished[row_idx] = True
+
+        if not active_any:
+            break
+
+        outputs = hf_model(
+            input_ids=step_tokens.unsqueeze(1),
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token_logits = outputs.logits[:, -1, :]
+
+    return sequences
+
+
+def _sample_constrained_facial_batch_legacy(
     model,
     *,
     batch_size: int,
@@ -168,6 +288,75 @@ def _sample_constrained_facial_batch(
 
 
 def _sample_random_walk_batch(
+    model,
+    *,
+    batch_size: int,
+    max_length: int,
+    bos_token_id: int,
+    pad_token_id: int,
+    model_block_size: int,
+    device,
+) -> list[list[int]]:
+    import torch
+
+    hf_model = _get_hf_causal_lm(model)
+    if hf_model is None or max_length > model_block_size:
+        return _sample_random_walk_batch_legacy(
+            model,
+            batch_size=batch_size,
+            max_length=max_length,
+            bos_token_id=bos_token_id,
+            pad_token_id=pad_token_id,
+            model_block_size=model_block_size,
+            device=device,
+        )
+
+    sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(batch_size)]
+
+    input_ids = torch.full(
+        (batch_size, 1),
+        fill_value=int(bos_token_id),
+        dtype=torch.long,
+        device=device,
+    )
+    outputs = hf_model(
+        input_ids=input_ids,
+        use_cache=True,
+        return_dict=True,
+    )
+    past_key_values = outputs.past_key_values
+    next_token_logits = outputs.logits[:, -1, :]
+
+    for _ in range(max_length - 1):
+        masked_logits = next_token_logits.clone()
+        masked_logits[:, bos_token_id:] = -float("inf")
+
+        for row_idx in range(batch_size):
+            seq = sequences[row_idx]
+            if len(seq) >= 2:
+                prev_vertex = int(seq[-1])
+                if 0 <= prev_vertex < bos_token_id:
+                    masked_logits[row_idx, prev_vertex] = -float("inf")
+
+        probs = torch.softmax(masked_logits, dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+        for row_idx in range(batch_size):
+            sequences[row_idx].append(int(next_tokens[row_idx].item()))
+
+        outputs = hf_model(
+            input_ids=next_tokens.unsqueeze(1),
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token_logits = outputs.logits[:, -1, :]
+
+    return sequences
+
+
+def _sample_random_walk_batch_legacy(
     model,
     *,
     batch_size: int,
@@ -331,6 +520,7 @@ def sample_model_transition_counts(
     batch_size: int = 128,
     show_progress: bool = False,
     progress_desc: str = "sampling walks",
+    log_every_samples: int | None = None,
 ) -> sp.csr_matrix:
     """
     Sample token sequences batch-by-batch and accumulate the transition count
@@ -394,6 +584,11 @@ def sample_model_transition_counts(
             )
             remaining -= cur_batch
             pbar.update(cur_batch)
+            if log_every_samples is not None and log_every_samples > 0:
+                sampled = int(num_samples) - int(remaining)
+                prev_sampled = sampled - int(cur_batch)
+                if sampled == int(num_samples) or sampled // log_every_samples > prev_sampled // log_every_samples:
+                    print(f"{progress_desc}: sampled {sampled}/{int(num_samples)}")
 
     pbar.close()
     return _counts_dict_to_csr(counts, num_nodes=num_nodes)
