@@ -229,16 +229,14 @@ def sample_graph_from_scores(
                         desc=f"{progress_desc}: edge fill",
                         leave=True,
                     )
-                print("Sampling")
                 sampled_idx = rng.choice(
                     len(available_edges),
                     size=remaining_target,
                     replace=False,
                     p=probs,
                 )
-                print("Done sampling")
+
                 sampled_idx = np.atleast_1d(sampled_idx).astype(np.int64, copy=False)
-                print("Adding edges")
                 for idx in sampled_idx.tolist():
                     edges.add(available_edges[int(idx)])
                 if show_progress:
