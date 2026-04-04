@@ -257,9 +257,12 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             overlap_adj = val_adj
             overlap_name = "validation"
         elif edge_overlap_target == "reference":
-            raise ValueError(
-                "edge_overlap_target='reference' leaks held-out edges when a "
-                "train/val/test split is active. Use 'validation' instead."
+            overlap_adj = A_lcc
+            overlap_name = "reference"
+            print(
+                "Warning: edge_overlap_target='reference' includes held-out edges "
+                "when a train/val/test split is active. Use this for reporting, "
+                "not for leakage-free model selection."
             )
         else:
             raise ValueError(f"Unsupported edge_overlap_target={edge_overlap_target!r}")
@@ -640,6 +643,16 @@ def train_model(
                 lp_split = eval_info["link_prediction_split"]
                 if lp_split is None:
                     raise RuntimeError("Missing link-prediction split for val criterion.")
+                A_hat = reconstruct_graph_from_transition_matrix(
+                    S,
+                    target_num_edges=int(eval_info["num_train_edges"]),
+                    seed=args.split_seed + epoch,
+                    walk_type=eval_walk_type,
+                    score_symmetrization=score_symmetrization,
+                    show_progress=bool(getattr(args, "debug_graph_reconstruction", False)),
+                    progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
+                    debug=bool(getattr(args, "debug_graph_reconstruction", False)),
+                )
                 scores = link_prediction_scores_from_transition_matrix(
                     S,
                     positive_edges=lp_split["val_edges"],
@@ -650,14 +663,19 @@ def train_model(
                 val_score = 0.5 * (
                     scores["roc_auc"] + scores["average_precision"]
                 )
+                overlap_adj = eval_info.get("overlap_adj", eval_info["reference_adj"])
+                overlap_name = str(eval_info.get("overlap_name", "reference"))
+                overlap_value = edge_overlap_ratio(A_hat, overlap_adj)
                 print(
                     f"  val_roc_auc={scores['roc_auc']:.4f} "
                     f"val_ap={scores['average_precision']:.4f} "
-                    f"val_score={val_score:.4f}"
+                    f"val_score={val_score:.4f} "
+                    f"edge_overlap[{overlap_name}]={overlap_value:.4f}"
                 )
                 epoch_record["val_roc_auc"] = float(scores["roc_auc"])
                 epoch_record["val_ap"] = float(scores["average_precision"])
                 epoch_record["val_score"] = float(val_score)
+                epoch_record["edge_overlap"] = float(overlap_value)
                 should_stop = early_state.update(val_score, step=epoch + 1)
                 history.append(epoch_record)
                 save_history_snapshot(history, args.save_dir)
