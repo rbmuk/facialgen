@@ -42,6 +42,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         default="coraml",
         choices=["coraml", "cora_ml", "pubmed", "citeseer", "polblogs"],
     )
+    parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--num-sign-configs", type=int, default=8)
     parser.add_argument("--sign-seed", type=int, default=2026)
