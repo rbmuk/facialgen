@@ -44,19 +44,37 @@ def load_graph_dataset_sparse(
     data_root = Path(data_dir)
 
     def _load_npz_graph(file_name: Path) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
-        with np.load(file_name, allow_pickle=False) as loader:
-            A = sp.csr_matrix(
-                (loader["adj_data"], loader["adj_indices"], loader["adj_indptr"]),
-                shape=tuple(loader["adj_shape"]),
-            )
-            if "attr_data" in loader:
-                X = sp.csr_matrix(
-                    (loader["attr_data"], loader["attr_indices"], loader["attr_indptr"]),
-                    shape=tuple(loader["attr_shape"]),
+        with np.load(file_name, allow_pickle=True) as loader:
+            keys = set(loader.files)
+
+            if {"adj_data", "adj_indices", "adj_indptr", "adj_shape"}.issubset(keys):
+                A = sp.csr_matrix(
+                    (loader["adj_data"], loader["adj_indices"], loader["adj_indptr"]),
+                    shape=tuple(loader["adj_shape"]),
                 )
+                if {"attr_data", "attr_indices", "attr_indptr", "attr_shape"}.issubset(keys):
+                    X = sp.csr_matrix(
+                        (loader["attr_data"], loader["attr_indices"], loader["attr_indptr"]),
+                        shape=tuple(loader["attr_shape"]),
+                    )
+                else:
+                    X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
+                labels = loader["labels"] if "labels" in keys else None
+            elif "adj_matrix" in keys:
+                adj_obj = loader["adj_matrix"]
+                A = sp.csr_matrix(adj_obj.item() if adj_obj.shape == () else adj_obj)
+                if "attr_matrix" in keys:
+                    attr_obj = loader["attr_matrix"]
+                    X = sp.csr_matrix(attr_obj.item() if attr_obj.shape == () else attr_obj)
+                else:
+                    X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
+                labels = loader["labels"] if "labels" in keys else None
             else:
-                X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
-            labels = loader.get("labels")
+                raise KeyError(
+                    f"Unsupported NPZ graph format for {file_name}. "
+                    f"Available keys: {sorted(loader.files)}"
+                )
+
             if labels is None:
                 y_arr = np.full(A.shape[0], -1, dtype=np.int64)
             else:
