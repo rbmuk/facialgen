@@ -23,6 +23,7 @@ from .data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
     OnlineFacialWalkChunkDataset,
+    OnlineRandomWalkChunkDataset,
     RandomWalkChunkDataset,
     load_graph_dataset_sparse,
     make_face_chunk_dataloader,
@@ -58,7 +59,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument(
         "--walk-type",
         type=str,
-        choices=["facial", "facial_online", "random"],
+        choices=["facial", "facial_online", "random", "random_online"],
         default="facial",
     )
     parser.add_argument(
@@ -427,14 +428,18 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             f"(from {int(args.num_sign_configs)} sign configs)"
         )
         sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
-    elif walk_type == "random":
+    elif walk_type in {"random", "random_online"}:
         walk_edge_length = max(vertex_context_size - 2, 1)
         approx_darts_per_sign_config = 2 * train_num_edges
         num_walks = max(
             int(round(args.num_sign_configs * approx_darts_per_sign_config / walk_edge_length)),
             n_lcc,
         )
-        train_ds = RandomWalkChunkDataset(
+        random_ds_cls = (
+            OnlineRandomWalkChunkDataset if walk_type == "random_online"
+            else RandomWalkChunkDataset
+        )
+        train_ds = random_ds_cls(
             train_adj,
             num_walks=num_walks,
             vertex_context_size=vertex_context_size,
@@ -445,7 +450,10 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         bos_token_id = train_ds.bos_token_id
         eos_token_id = train_ds.eos_token_id
         vocab_size = train_ds.pad_token_id + 1
-        dataset_size_desc = f"Random-walk samples: {len(train_ds)}"
+        dataset_size_desc = (
+            f"{'Online ' if walk_type == 'random_online' else ''}"
+            f"random-walk samples: {len(train_ds)}"
+        )
         sample_count_desc = f"Training samples @ T={vertex_context_size}: {len(train_ds)}"
     else:
         raise ValueError(f"Unsupported walk_type={walk_type!r}")

@@ -830,6 +830,52 @@ class RandomWalkChunkDataset(Dataset):
         }
 
 
+class OnlineRandomWalkChunkDataset(RandomWalkChunkDataset):
+    """
+    Fresh BOS-anchored second-order random-walk corpus each epoch.
+
+    This keeps the same sample shape as `RandomWalkChunkDataset`, but resamples
+    the walk corpus in `set_epoch(...)` so the training loop can expose the
+    model to new random-walk realizations over time.
+    """
+
+    def __init__(
+        self,
+        A: sp.spmatrix,
+        *,
+        num_walks: int,
+        vertex_context_size: int,
+        epoch_seed: int = 0,
+        second_order_p: float = 1.0,
+        second_order_q: float = 1.0,
+        bos_token_id: int | None = None,
+        pad_token_id: int | None = None,
+    ) -> None:
+        super().__init__(
+            A,
+            num_walks=num_walks,
+            vertex_context_size=vertex_context_size,
+            epoch_seed=epoch_seed,
+            second_order_p=second_order_p,
+            second_order_q=second_order_q,
+            bos_token_id=bos_token_id,
+            pad_token_id=pad_token_id,
+        )
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self.tokens = self._build_token_corpus()
+
+    def _build_token_corpus(self) -> np.ndarray:
+        tokens = np.empty((self.num_walks, self.walk_length + 1), dtype=np.int64)
+        tokens[:, 0] = self.bos_token_id
+        epoch_offset = 1_000_003 * int(self.epoch)
+        for idx in range(self.num_walks):
+            seed = self.epoch_seed + epoch_offset + 97_003 * int(idx)
+            tokens[idx, 1:] = self._sample_walk_vertices_from_seed(seed)
+        return tokens
+
+
 class FaceChunkCollator:
     """Pad chunked face sequences for transformer-style training."""
 
