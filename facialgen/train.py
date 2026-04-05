@@ -112,6 +112,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-generation-batch-size", type=int, default=None)
     parser.add_argument("--gpu-transition-counts", action="store_true")
+    parser.add_argument("--report-sampling-timing", action="store_true")
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--eval-max-length", type=int, default=None)
     parser.add_argument(
@@ -794,6 +795,7 @@ def train_model(
                     else None
                 ),
                 gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
+                report_timing=bool(getattr(args, "report_sampling_timing", False)),
             )
 
             if args.early_stop_mode == "val":

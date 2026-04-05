@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import scipy.sparse as sp
 
@@ -621,6 +623,7 @@ def sample_model_transition_counts(
     progress_desc: str = "sampling walks",
     log_every_samples: int | None = None,
     gpu_transition_counts: bool = False,
+    report_timing: bool = False,
 ) -> sp.csr_matrix:
     """
     Sample token sequences batch-by-batch and accumulate the transition count
@@ -653,6 +656,8 @@ def sample_model_transition_counts(
     else:
         counts = {}
         counts_tensor = None
+    decode_seconds = 0.0
+    count_update_seconds = 0.0
     pbar = tqdm(
         total=remaining,
         desc=progress_desc,
@@ -663,6 +668,7 @@ def sample_model_transition_counts(
     with torch.inference_mode():
         while remaining > 0:
             cur_batch = min(batch_size, remaining)
+            t_decode_start = time.perf_counter()
             if walk_type == "facial":
                 sequences = _sample_constrained_facial_batch(
                     model,
@@ -685,6 +691,8 @@ def sample_model_transition_counts(
                 )
             else:
                 raise ValueError(f"Unsupported walk_type={walk_type!r}")
+            decode_seconds += time.perf_counter() - t_decode_start
+            t_count_start = time.perf_counter()
             if counts_tensor is not None:
                 _update_transition_counts_dense_tensor(
                     counts_tensor,
@@ -699,6 +707,7 @@ def sample_model_transition_counts(
                     num_nodes=num_nodes,
                     walk_type=walk_type,
                 )
+            count_update_seconds += time.perf_counter() - t_count_start
             remaining -= cur_batch
             pbar.update(cur_batch)
             if log_every_samples is not None and log_every_samples > 0:
@@ -708,6 +717,16 @@ def sample_model_transition_counts(
                     print(f"{progress_desc}: sampled {sampled}/{int(num_samples)}")
 
     pbar.close()
+    if report_timing:
+        total_seconds = decode_seconds + count_update_seconds
+        other_seconds = max(total_seconds - decode_seconds - count_update_seconds, 0.0)
+        print(
+            f"{progress_desc}: timing "
+            f"decode={decode_seconds:.3f}s, "
+            f"count_update={count_update_seconds:.3f}s, "
+            f"other={other_seconds:.3f}s, "
+            f"total={total_seconds:.3f}s"
+        )
     if counts_tensor is not None:
         return _dense_tensor_to_csr(counts_tensor)
     return _counts_dict_to_csr(counts, num_nodes=num_nodes)

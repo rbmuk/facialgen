@@ -214,6 +214,7 @@ def run_final_evaluation(
                 else None
             ),
             gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
+            report_timing=bool(getattr(args, "report_sampling_timing", False)),
         )
         saved_score_matrices.append(np.asarray(S.toarray(), dtype=np.float64))
 
