@@ -23,6 +23,7 @@ from .data import (
 )
 from .early_stopping import (
     EarlyStoppingState,
+    connected_train_subsample,
     connected_link_prediction_split,
     edge_overlap_ratio,
     link_prediction_scores_from_transition_matrix,
@@ -86,6 +87,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--early-stop-min-delta", type=float, default=0.0)
     parser.add_argument("--val-fraction", type=float, default=0.10)
     parser.add_argument("--test-fraction", type=float, default=0.05)
+    parser.add_argument("--train-fraction", type=float, default=None)
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-generation-batch-size", type=int, default=None)
@@ -180,13 +182,19 @@ def build_run_name(args: argparse.Namespace) -> str:
     dataset_name = str(getattr(args, "dataset_name", "dataset"))
     walk_type = str(getattr(args, "walk_type", "walk"))
     early_stop_mode = str(getattr(args, "early_stop_mode", "none"))
+    train_fraction = getattr(args, "train_fraction", None)
     stop_tag = {
         "edge_overlap": "eo",
         "val": "val",
         "none": "none",
     }.get(early_stop_mode, early_stop_mode)
+    train_tag = (
+        f"_T{float(train_fraction):.2f}".replace(".", "p")
+        if train_fraction is not None
+        else ""
+    )
     return (
-        f"{dataset_name}_{walk_type}_{stop_tag}_"
+        f"{dataset_name}_{walk_type}_{stop_tag}{train_tag}_"
         f"L{int(getattr(args, 'n_layer', 0))}_"
         f"H{int(getattr(args, 'n_head', 0))}_"
         f"D{int(getattr(args, 'n_embd', 0))}"
@@ -274,6 +282,35 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             )
         else:
             raise ValueError(f"Unsupported edge_overlap_target={edge_overlap_target!r}")
+
+    train_fraction = getattr(args, "train_fraction", None)
+    if train_fraction is not None:
+        train_fraction = float(train_fraction)
+        if not (0.0 < train_fraction <= 1.0):
+            raise ValueError("train_fraction must lie in (0, 1].")
+        max_train_fraction = float(train_num_edges) / max(float(ref_num_edges), 1.0)
+        if train_fraction > max_train_fraction + 1e-12:
+            raise ValueError(
+                "train_fraction exceeds the available post-split train fraction of "
+                f"the full graph: requested {train_fraction:.4f}, "
+                f"available {max_train_fraction:.4f}. "
+                "Reduce train_fraction or lower val/test fractions."
+            )
+        if train_fraction < max_train_fraction - 1e-12:
+            original_train_edges = int(sp.triu(train_adj, k=1).nnz)
+            relative_train_fraction = train_fraction / max_train_fraction
+            train_adj = connected_train_subsample(
+                train_adj,
+                train_fraction=relative_train_fraction,
+                seed=int(args.split_seed) + 17,
+            )
+            train_num_edges = int(sp.triu(train_adj, k=1).nnz)
+            print(
+                "Applied connected train-edge subsampling: "
+                f"kept {train_num_edges}/{original_train_edges} train edges "
+                f"({train_num_edges / max(original_train_edges, 1):.3f} of train split, "
+                f"{train_num_edges / max(ref_num_edges, 1):.3f} of full graph)"
+            )
 
     curvature = resistance_curvature(
         train_adj,

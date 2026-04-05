@@ -118,6 +118,59 @@ def connected_link_prediction_split(
     }
 
 
+def connected_train_subsample(
+    A_train: sp.spmatrix,
+    *,
+    train_fraction: float,
+    seed: int | None = None,
+) -> sp.csr_matrix:
+    """
+    Keep a connected subset of the train graph edges.
+
+    A BFS spanning tree is always retained. Additional edges are sampled
+    uniformly from the remaining removable train edges until the requested
+    fraction of train edges is reached.
+    """
+    A_train = _to_undirected_simple_csr(A_train)
+    if not (0.0 < float(train_fraction) <= 1.0):
+        raise ValueError("train_fraction must lie in (0, 1].")
+    if float(train_fraction) >= 1.0:
+        return A_train
+
+    rng = np.random.default_rng(seed)
+    all_edges = _upper_triangle_edges(A_train)
+    num_edges = int(all_edges.shape[0])
+    if num_edges == 0:
+        return A_train
+
+    tree = breadth_first_tree(A_train, i_start=0, directed=False)
+    tree = _to_undirected_simple_csr(tree)
+    tree_edges = {tuple(edge) for edge in _upper_triangle_edges(tree).tolist()}
+    removable_edges = [
+        tuple(edge) for edge in all_edges.tolist()
+        if tuple(edge) not in tree_edges
+    ]
+
+    min_keep = len(tree_edges)
+    target_keep = max(int(round(float(train_fraction) * num_edges)), min_keep)
+    target_keep = min(target_keep, num_edges)
+    extra_needed = max(target_keep - min_keep, 0)
+
+    if extra_needed > len(removable_edges):
+        extra_needed = len(removable_edges)
+
+    chosen_extra: list[tuple[int, int]] = []
+    if extra_needed > 0:
+        perm = rng.permutation(len(removable_edges))
+        chosen_extra = [removable_edges[i] for i in perm[:extra_needed]]
+
+    kept_edges = np.asarray(sorted([*tree_edges, *chosen_extra]), dtype=np.int64)
+    rows = np.concatenate((kept_edges[:, 0], kept_edges[:, 1]))
+    cols = np.concatenate((kept_edges[:, 1], kept_edges[:, 0]))
+    data = np.ones(rows.shape[0], dtype=np.float64)
+    return sp.coo_matrix((data, (rows, cols)), shape=A_train.shape).tocsr()
+
+
 def edge_overlap_ratio(
     A_generated: sp.spmatrix,
     A_reference: sp.spmatrix,

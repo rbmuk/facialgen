@@ -187,6 +187,7 @@ def run_final_evaluation(
     generated_results: list[dict[str, float]] = []
     generated_stats_rows: list[dict[str, float | None]] = []
     split_score_tables: list[pd.DataFrame] = []
+    saved_score_matrices: list[np.ndarray] = []
     darts_per_sequence = max((int(final_max_length) - 1) // 2, 1) if eval_walk_type == "facial" else max(int(final_max_length) - 1, 1)
     progress_mode = str(getattr(args, "progress_mode", "tqdm"))
 
@@ -213,6 +214,7 @@ def run_final_evaluation(
                 else None
             ),
         )
+        saved_score_matrices.append(np.asarray(S.toarray(), dtype=np.float64))
 
         if progress_mode == "log":
             print(f"final graph {graph_idx + 1}/{args.num_generated_graphs}: graph reconstruction")
@@ -320,6 +322,10 @@ def run_final_evaluation(
         lp_table.to_csv(out_dir / "final_eval_link_prediction.csv", index=False)
         graph_report.to_csv(out_dir / "final_eval_graph_stats.csv", index=False)
         split_score_table.to_csv(out_dir / "final_eval_score_diagnostics.csv", index=False)
+        if len(saved_score_matrices) == 1:
+            np.save(out_dir / "final_eval_score_matrix.npy", saved_score_matrices[0])
+        else:
+            np.save(out_dir / "final_eval_score_matrices.npy", np.stack(saved_score_matrices, axis=0))
         meta = {
             "dataset_name": args.dataset_name,
             "walk_type": args.walk_type,
