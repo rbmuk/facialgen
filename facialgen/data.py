@@ -69,6 +69,39 @@ def load_graph_dataset_sparse(
                 else:
                     X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
                 labels = loader["labels"] if "labels" in keys else None
+            elif keys == {"arr_0"}:
+                obj = loader["arr_0"]
+                obj = obj.item() if getattr(obj, "shape", None) == () else obj
+                if not isinstance(obj, dict):
+                    raise KeyError(
+                        f"Unsupported arr_0 payload type for {file_name}: {type(obj)!r}"
+                    )
+                if {"adj_data", "adj_indices", "adj_indptr", "adj_shape"}.issubset(obj.keys()):
+                    A = sp.csr_matrix(
+                        (obj["adj_data"], obj["adj_indices"], obj["adj_indptr"]),
+                        shape=tuple(obj["adj_shape"]),
+                    )
+                    if {"attr_data", "attr_indices", "attr_indptr", "attr_shape"}.issubset(obj.keys()):
+                        X = sp.csr_matrix(
+                            (obj["attr_data"], obj["attr_indices"], obj["attr_indptr"]),
+                            shape=tuple(obj["attr_shape"]),
+                        )
+                    else:
+                        X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
+                    labels = obj.get("labels")
+                elif "adj_matrix" in obj:
+                    A = sp.csr_matrix(obj["adj_matrix"])
+                    X = (
+                        sp.csr_matrix(obj["attr_matrix"])
+                        if "attr_matrix" in obj
+                        else sp.eye(A.shape[0], format="csr", dtype=np.float64)
+                    )
+                    labels = obj.get("labels")
+                else:
+                    raise KeyError(
+                        f"Unsupported arr_0 dict format for {file_name}. "
+                        f"Available nested keys: {sorted(obj.keys())}"
+                    )
             else:
                 raise KeyError(
                     f"Unsupported NPZ graph format for {file_name}. "
