@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+import networkx as nx
 import numpy as np
 import scipy.sparse as sp
-from scipy.sparse.csgraph import breadth_first_tree
+from scipy.sparse.csgraph import breadth_first_tree, connected_components, minimum_spanning_tree
 from scipy.stats import rankdata
+import warnings
 
 from .evaluation import aggregate_transition_scores, transition_count_matrix_from_walks
 
@@ -52,6 +54,16 @@ def _sample_non_edges(
     return np.asarray(sorted(chosen), dtype=np.int64)
 
 
+def _edges_to_sparse(edges: np.ndarray, num_nodes: int) -> sp.csr_matrix:
+    edges = np.asarray(edges, dtype=np.int64)
+    if edges.size == 0:
+        return sp.csr_matrix((num_nodes, num_nodes), dtype=np.float64)
+    rows = edges[:, 0]
+    cols = edges[:, 1]
+    data = np.ones(rows.shape[0], dtype=np.float64)
+    return sp.coo_matrix((data, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
+
+
 def connected_link_prediction_split(
     A: sp.spmatrix,
     *,
@@ -60,61 +72,99 @@ def connected_link_prediction_split(
     seed: int | None = None,
 ) -> dict[str, np.ndarray | sp.csr_matrix]:
     """
-    Split edges into connected train graph, validation edges, and test edges.
+    NetGAN-style train/validation/test split for an undirected connected graph.
 
-    The train graph is kept connected by retaining a BFS spanning tree and
-    sampling validation/test edges only from the remaining edges.
+    This mirrors the logic in `train_val_test_split_adjacency(..., every_node=True,
+    connected=True, undirected=True, use_edge_cover=True, set_ops=True)`.
     """
     A = _to_undirected_simple_csr(A)
-    rng = np.random.default_rng(seed)
-
-    all_edges = _upper_triangle_edges(A)
-    num_edges = int(all_edges.shape[0])
-    if num_edges == 0:
+    if val_fraction + test_fraction <= 0:
+        raise ValueError("val_fraction + test_fraction must be positive.")
+    if A.nnz == 0:
         raise ValueError("Graph must contain at least one edge.")
+    if A.diagonal().sum() != 0:
+        raise ValueError("Graph must not contain self-loops.")
+    deg = A.sum(0).A1 + A.sum(1).A1
+    if np.any(deg == 0):
+        raise ValueError("Graph must not contain dangling/isolated nodes.")
+    if connected_components(A)[0] != 1:
+        raise ValueError("Graph must be connected.")
 
-    tree = breadth_first_tree(A, i_start=0, directed=False)
-    tree = _to_undirected_simple_csr(tree)
-    tree_edges = {tuple(edge) for edge in _upper_triangle_edges(tree).tolist()}
-    removable_edges = [
-        tuple(edge) for edge in all_edges.tolist()
-        if tuple(edge) not in tree_edges
-    ]
+    rng = np.random.RandomState(seed)
+    # NetGAN utils: for undirected graphs only keep one triangular half so
+    # each undirected edge is represented once during splitting.
+    A_half = sp.tril(A).tocsr()
+    A_half.eliminate_zeros()
 
-    num_val = int(round(val_fraction * num_edges))
-    num_test = int(round(test_fraction * num_edges))
-    num_holdout = num_val + num_test
-    if num_holdout > len(removable_edges):
+    E = int(A_half.nnz)
+    N = int(A_half.shape[0])
+    s_train = int(E * (1.0 - float(val_fraction) - float(test_fraction)))
+
+    # Hold a spanning tree first to keep the training graph connected.
+    A_hold = minimum_spanning_tree(A_half)
+    A_hold[A_hold > 1] = 1
+    A_hold.eliminate_zeros()
+    A_sample = A_half - A_hold
+    s_train = s_train - int(A_hold.nnz)
+
+    if s_train < 0:
         raise ValueError(
-            "Not enough removable edges to keep the train graph connected while "
-            "holding out the requested validation/test fractions."
+            "Training percentage too low to keep the graph connected after splitting."
         )
 
-    perm = rng.permutation(len(removable_edges))
-    held_out = [removable_edges[i] for i in perm[:num_holdout]]
-    val_edges = np.asarray(held_out[:num_val], dtype=np.int64)
-    test_edges = np.asarray(held_out[num_val:], dtype=np.int64)
+    idx_ones = rng.permutation(A_sample.nnz)
+    ones = np.column_stack(A_sample.nonzero()).astype(np.int64)
+    train_ones = ones[idx_ones[:s_train]]
+    held_out_ones = ones[idx_ones[s_train:]]
 
-    holdout_set = {tuple(edge) for edge in held_out}
-    train_edges = np.asarray(
-        [tuple(edge) for edge in all_edges.tolist() if tuple(edge) not in holdout_set],
-        dtype=np.int64,
-    )
+    # Return back held spanning-tree edges.
+    hold_edges = np.column_stack(A_hold.nonzero()).astype(np.int64)
+    if hold_edges.size > 0:
+        train_ones = np.row_stack((train_ones, hold_edges)).astype(np.int64)
 
-    rows = np.concatenate((train_edges[:, 0], train_edges[:, 1]))
-    cols = np.concatenate((train_edges[:, 1], train_edges[:, 0]))
-    data = np.ones(rows.shape[0], dtype=np.float64)
-    train_adj = sp.coo_matrix((data, (rows, cols)), shape=A.shape).tocsr()
+    n_test = int(len(held_out_ones))
+    random_sample = rng.randint(0, N, [int(2.3 * n_test), 2])
+    random_sample = random_sample[random_sample[:, 0] > random_sample[:, 1]]
+    test_zeros = random_sample[A_half[random_sample[:, 0], random_sample[:, 1]].A1 == 0]
+    test_zeros = np.row_stack(test_zeros)[:n_test].astype(np.int64)
+    if test_zeros.shape[0] != n_test:
+        raise RuntimeError("Failed to sample enough non-edges in NetGAN-style split.")
 
-    val_non_edges = _sample_non_edges(A, num_samples=len(val_edges), rng=rng)
-    test_non_edges = _sample_non_edges(A, num_samples=len(test_edges), rng=rng)
+    s_val_ones = int(len(held_out_ones) * float(val_fraction) / (float(val_fraction) + float(test_fraction)))
+    s_val_zeros = int(len(test_zeros) * float(val_fraction) / (float(val_fraction) + float(test_fraction)))
+
+    val_edges_half = held_out_ones[:s_val_ones].astype(np.int64)
+    test_edges_half = held_out_ones[s_val_ones:].astype(np.int64)
+    val_non_edges_half = test_zeros[:s_val_zeros].astype(np.int64)
+    test_non_edges_half = test_zeros[s_val_zeros:].astype(np.int64)
+
+    # Symmetrize back to a full undirected training adjacency, but keep the
+    # positive/negative edge-pair outputs as single undirected pairs (u < v).
+    train_edges_half = train_ones.astype(np.int64)
+    if train_edges_half.size == 0:
+        train_adj = sp.csr_matrix(A.shape, dtype=np.float64)
+    else:
+        train_edges_full = np.row_stack(
+            (train_edges_half, np.column_stack((train_edges_half[:, 1], train_edges_half[:, 0])))
+        ).astype(np.int64)
+        train_adj = _edges_to_sparse(train_edges_full, N)
+        train_adj = _to_undirected_simple_csr(train_adj)
+
+    # Ensure outputs are upper-triangle undirected pairs to match our scorer.
+    def _canon(pairs: np.ndarray) -> np.ndarray:
+        pairs = np.asarray(pairs, dtype=np.int64)
+        if pairs.size == 0:
+            return np.empty((0, 2), dtype=np.int64)
+        lo = np.minimum(pairs[:, 0], pairs[:, 1])
+        hi = np.maximum(pairs[:, 0], pairs[:, 1])
+        return np.column_stack((lo, hi)).astype(np.int64)
 
     return {
         "train_adj": train_adj,
-        "val_edges": val_edges,
-        "val_non_edges": val_non_edges,
-        "test_edges": test_edges,
-        "test_non_edges": test_non_edges,
+        "val_edges": _canon(val_edges_half),
+        "val_non_edges": _canon(val_non_edges_half),
+        "test_edges": _canon(test_edges_half),
+        "test_non_edges": _canon(test_non_edges_half),
     }
 
 

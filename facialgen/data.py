@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,6 @@ import numpy as np
 import scipy.sparse as sp
 
 from .rotation_systems import facial_walks_from_curvature_signs
-from .curvature import largest_connected_component
 
 try:
     import torch
@@ -41,111 +39,6 @@ def load_graph_dataset_sparse(
     dataset_key = dataset_name.strip().lower().replace("-", "_")
 
     root = Path(pyg_root) if pyg_root is not None else Path(data_dir) / "pyg"
-    data_root = Path(data_dir)
-
-    def _load_npz_graph(file_name: Path) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
-        with np.load(file_name, allow_pickle=True) as loader:
-            keys = set(loader.files)
-
-            if {"adj_data", "adj_indices", "adj_indptr", "adj_shape"}.issubset(keys):
-                A = sp.csr_matrix(
-                    (loader["adj_data"], loader["adj_indices"], loader["adj_indptr"]),
-                    shape=tuple(loader["adj_shape"]),
-                )
-                if {"attr_data", "attr_indices", "attr_indptr", "attr_shape"}.issubset(keys):
-                    X = sp.csr_matrix(
-                        (loader["attr_data"], loader["attr_indices"], loader["attr_indptr"]),
-                        shape=tuple(loader["attr_shape"]),
-                    )
-                else:
-                    X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
-                labels = loader["labels"] if "labels" in keys else None
-            elif "adj_matrix" in keys:
-                adj_obj = loader["adj_matrix"]
-                A = sp.csr_matrix(adj_obj.item() if adj_obj.shape == () else adj_obj)
-                if "attr_matrix" in keys:
-                    attr_obj = loader["attr_matrix"]
-                    X = sp.csr_matrix(attr_obj.item() if attr_obj.shape == () else attr_obj)
-                else:
-                    X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
-                labels = loader["labels"] if "labels" in keys else None
-            elif keys == {"arr_0"}:
-                obj = loader["arr_0"]
-                obj = obj.item() if getattr(obj, "shape", None) == () else obj
-                if not isinstance(obj, dict):
-                    raise KeyError(
-                        f"Unsupported arr_0 payload type for {file_name}: {type(obj)!r}"
-                    )
-                if {"adj_data", "adj_indices", "adj_indptr", "adj_shape"}.issubset(obj.keys()):
-                    A = sp.csr_matrix(
-                        (obj["adj_data"], obj["adj_indices"], obj["adj_indptr"]),
-                        shape=tuple(obj["adj_shape"]),
-                    )
-                    if {"attr_data", "attr_indices", "attr_indptr", "attr_shape"}.issubset(obj.keys()):
-                        X = sp.csr_matrix(
-                            (obj["attr_data"], obj["attr_indices"], obj["attr_indptr"]),
-                            shape=tuple(obj["attr_shape"]),
-                        )
-                    else:
-                        X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
-                    labels = obj.get("labels")
-                elif "adj_matrix" in obj:
-                    A = sp.csr_matrix(obj["adj_matrix"])
-                    X = (
-                        sp.csr_matrix(obj["attr_matrix"])
-                        if "attr_matrix" in obj
-                        else sp.eye(A.shape[0], format="csr", dtype=np.float64)
-                    )
-                    labels = obj.get("labels")
-                else:
-                    raise KeyError(
-                        f"Unsupported arr_0 dict format for {file_name}. "
-                        f"Available nested keys: {sorted(obj.keys())}"
-                    )
-            else:
-                raise KeyError(
-                    f"Unsupported NPZ graph format for {file_name}. "
-                    f"Available keys: {sorted(loader.files)}"
-                )
-
-            if labels is None:
-                y_arr = np.full(A.shape[0], -1, dtype=np.int64)
-            else:
-                y_arr = np.asarray(labels, dtype=np.int64)
-
-        A = sp.csr_matrix(A, dtype=np.float64)
-        X = sp.csr_matrix(X, dtype=np.float64)
-        return A, X, y_arr
-
-    def _download_file(url: str, target: Path) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, target)
-
-    def _load_coraml_zuegner() -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
-        npz_path = data_root / "zuegner" / "cora_ml.npz"
-        if not npz_path.exists():
-            url = "https://raw.githubusercontent.com/danielzuegner/netgan/master/data/cora_ml.npz"
-            _download_file(url, npz_path)
-        A, X, y_arr = _load_npz_graph(npz_path)
-
-        # Match the NetGAN/Zuegner preprocessing:
-        # symmetrize, binarize, keep the largest connected component, remove diagonal.
-        A = sp.csr_matrix(A, dtype=np.float64)
-        A = A + A.T
-        A = A.tolil()
-        A[A > 1] = 1
-        A = A.tocsr()
-        A_lcc, nodes = largest_connected_component(A)
-        A_lcc = A_lcc.tolil()
-        A_lcc.setdiag(0.0)
-        A_lcc = A_lcc.astype(np.float64).tocsr()
-        A_lcc.eliminate_zeros()
-        X = sp.csr_matrix(X[nodes], dtype=np.float64)
-        y_arr = np.asarray(y_arr[nodes], dtype=np.int64)
-        return A_lcc, X, y_arr
-
-    if dataset_key in {"coraml", "cora_ml"}:
-        return _load_coraml_zuegner()
 
     try:
         datasets_mod = importlib.import_module("torch_geometric.datasets")
@@ -155,7 +48,10 @@ def load_graph_dataset_sparse(
         ) from exc
 
     try:
-        if dataset_key == "pubmed":
+        if dataset_key in {"coraml", "cora_ml"}:
+            CitationFull = getattr(datasets_mod, "CitationFull")
+            dataset = CitationFull(root=str(root), name="cora_ml")
+        elif dataset_key == "pubmed":
             Planetoid = getattr(datasets_mod, "Planetoid")
             dataset = Planetoid(root=str(root), name="PubMed")
         elif dataset_key == "citeseer":
