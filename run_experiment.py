@@ -33,7 +33,7 @@ from facialgen.train import (
 def add_run_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     add_training_args(parser)
     parser.add_argument("--skip-train", action="store_true")
-    parser.add_argument("--final-generated-walks", type=int, default=500_000)
+    parser.add_argument("--final-generated-walks-list", type=int, nargs="+", required=True)
     parser.add_argument("--final-max-length", type=int, default=None)
     parser.add_argument("--generation-batch-size", type=int, default=256)
     parser.add_argument("--num-generated-graphs", type=int, default=1)
@@ -87,6 +87,16 @@ def _load_best_val_checkpoint(
     run_dir: Path,
     history: list[dict[str, float]],
 ) -> tuple[FacialGen, Path] | None:
+    best_meta_path = run_dir / "best_val_checkpoint.json"
+    final_dir = run_dir / "final"
+    if best_meta_path.exists() and final_dir.exists():
+        try:
+            payload = json.loads(best_meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            payload = None
+        if isinstance(payload, dict):
+            return FacialGen.from_pretrained(str(final_dir)), final_dir
+
     best_epoch = _best_val_epoch_from_history(history)
     if best_epoch is None:
         return None
@@ -183,136 +193,157 @@ def run_final_evaluation(
             seed=args.split_seed,
         )
 
+    walk_budgets = [int(x) for x in getattr(args, "final_generated_walks_list", [])]
+
     reference_stats = compute_graph_statistics(reference_adj, labels=reference_labels)
     generated_results: list[dict[str, float]] = []
-    generated_stats_rows: list[dict[str, float | None]] = []
+    graph_report_rows: list[dict[str, float | None]] = []
     split_score_tables: list[pd.DataFrame] = []
-    saved_score_matrices: list[np.ndarray] = []
+    saved_score_matrices_by_budget: dict[int, list[np.ndarray]] = {}
     darts_per_sequence = max((int(final_max_length) - 1) // 2, 1) if eval_walk_type == "facial" else max(int(final_max_length) - 1, 1)
     progress_mode = str(getattr(args, "progress_mode", "tqdm"))
 
-    for graph_idx in range(int(args.num_generated_graphs)):
-        if progress_mode == "log":
-            print(
-                f"final graph {graph_idx + 1}/{args.num_generated_graphs}: "
-                f"sampling {int(args.final_generated_walks)} walks"
+    for generated_walks in walk_budgets:
+        budget_generated_stats: list[dict[str, float | None]] = []
+        budget_saved_score_matrices: list[np.ndarray] = []
+        for graph_idx in range(int(args.num_generated_graphs)):
+            if progress_mode == "log":
+                print(
+                    f"final graph {graph_idx + 1}/{args.num_generated_graphs}: "
+                    f"sampling {int(generated_walks)} walks"
+                )
+            S = sample_model_transition_counts(
+                model,
+                num_samples=int(generated_walks),
+                max_length=int(final_max_length),
+                bos_token_id=int(eval_info["bos_token_id"]),
+                num_nodes=num_nodes,
+                device=device,
+                walk_type=eval_walk_type,
+                batch_size=int(args.generation_batch_size),
+                show_progress=(progress_mode == "tqdm"),
+                progress_desc=(
+                    f"final sampling {int(generated_walks)} walks "
+                    f"graph {graph_idx + 1}/{args.num_generated_graphs}"
+                ),
+                log_every_samples=(
+                    max(int(generated_walks) // 10, 1)
+                    if progress_mode == "log"
+                    else None
+                ),
+                gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
+                report_timing=bool(getattr(args, "debug", False)),
             )
-        S = sample_model_transition_counts(
-            model,
-            num_samples=int(args.final_generated_walks),
-            max_length=int(final_max_length),
-            bos_token_id=int(eval_info["bos_token_id"]),
-            num_nodes=num_nodes,
-            device=device,
-            walk_type=eval_walk_type,
-            batch_size=int(args.generation_batch_size),
-            show_progress=(progress_mode == "tqdm"),
-            progress_desc=f"final sampling graph {graph_idx + 1}/{args.num_generated_graphs}",
-            log_every_samples=(
-                max(int(args.final_generated_walks) // 10, 1)
-                if progress_mode == "log"
-                else None
-            ),
-            gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
-            report_timing=bool(getattr(args, "report_sampling_timing", False)),
-        )
-        saved_score_matrices.append(np.asarray(S.toarray(), dtype=np.float64))
+            budget_saved_score_matrices.append(np.asarray(S.toarray(), dtype=np.float64))
 
-        if progress_mode == "log":
-            print(f"final graph {graph_idx + 1}/{args.num_generated_graphs}: graph reconstruction")
-        A_hat = reconstruct_graph_from_transition_matrix(
-            S,
-            target_num_edges=num_reference_edges,
-            seed=int(args.reconstruction_seed) + graph_idx,
-            walk_type=eval_walk_type,
-            score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
-            show_progress=(
-                progress_mode == "tqdm"
-                and bool(getattr(args, "debug_graph_reconstruction", False))
-            ),
-            progress_desc=f"graph reconstruction {graph_idx + 1}/{args.num_generated_graphs}",
-            debug=(
-                progress_mode == "log"
-                or bool(getattr(args, "debug_graph_reconstruction", False))
-            ),
-        )
-
-        train_upper = sp.triu(eval_info["train_adj"], k=1).tocoo()
-        train_edges = (
-            np.column_stack((train_upper.row, train_upper.col)).astype(np.int64)
-            if train_upper.nnz > 0
-            else np.empty((0, 2), dtype=np.int64)
-        )
-        split_score_rows = []
-        for split_name, split_edges in [
-            ("train", train_edges),
-            ("validation", lp_split["val_edges"]),
-            ("test", lp_split["test_edges"]),
-        ]:
-            split_scores = _edge_scores_from_raw_S(
+            if progress_mode == "log":
+                print(
+                    f"final graph {graph_idx + 1}/{args.num_generated_graphs}: "
+                    f"graph reconstruction ({int(generated_walks)} walks)"
+                )
+            A_hat = reconstruct_graph_from_transition_matrix(
                 S,
-                np.asarray(split_edges, dtype=np.int64),
-                darts_per_sequence=darts_per_sequence,
+                target_num_edges=num_reference_edges,
+                seed=int(args.reconstruction_seed) + graph_idx,
+                walk_type=eval_walk_type,
+                score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
+                show_progress=(
+                    progress_mode == "tqdm"
+                    and bool(getattr(args, "debug", False))
+                ),
+                progress_desc=(
+                    f"graph reconstruction {int(generated_walks)} walks "
+                    f"{graph_idx + 1}/{args.num_generated_graphs}"
+                ),
+                debug=(
+                    progress_mode == "log"
+                    or bool(getattr(args, "debug", False))
+                ),
             )
-            split_score_rows.append(
+
+            train_upper = sp.triu(eval_info["train_adj"], k=1).tocoo()
+            train_edges = (
+                np.column_stack((train_upper.row, train_upper.col)).astype(np.int64)
+                if train_upper.nnz > 0
+                else np.empty((0, 2), dtype=np.int64)
+            )
+            split_score_rows = []
+            for split_name, split_edges in [
+                ("train", train_edges),
+                ("validation", lp_split["val_edges"]),
+                ("test", lp_split["test_edges"]),
+            ]:
+                split_scores = _edge_scores_from_raw_S(
+                    S,
+                    np.asarray(split_edges, dtype=np.int64),
+                    darts_per_sequence=darts_per_sequence,
+                )
+                split_score_rows.append(
+                    {
+                        "final_generated_walks": int(generated_walks),
+                        "graph_id": graph_idx,
+                        "split": split_name,
+                        "num_edges": int(len(split_edges)),
+                        "min_8S_over_sumS": float(np.min(split_scores)) if split_scores.size else float("nan"),
+                        "min_nonzero_gap": _min_nonzero_gap(split_scores),
+                    }
+                )
+            split_score_table = pd.DataFrame(split_score_rows)
+            split_score_tables.append(split_score_table)
+            print("raw-S edge score diagnostics (8*S[i,j] / sum_uv S[u,v]):")
+            print(split_score_table.to_string(index=False))
+
+            val_scores = link_prediction_scores_from_transition_matrix(
+                S,
+                positive_edges=lp_split["val_edges"],
+                negative_edges=lp_split["val_non_edges"],
+                walk_type=eval_walk_type,
+                score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
+            )
+            test_scores = link_prediction_scores_from_transition_matrix(
+                S,
+                positive_edges=lp_split["test_edges"],
+                negative_edges=lp_split["test_non_edges"],
+                walk_type=eval_walk_type,
+                score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
+            )
+            graph_stats = compute_graph_statistics(A_hat, labels=reference_labels)
+            overlap = edge_overlap_ratio(A_hat, overlap_adj)
+
+            generated_results.append(
                 {
+                    "final_generated_walks": int(generated_walks),
                     "graph_id": graph_idx,
-                    "split": split_name,
-                    "num_edges": int(len(split_edges)),
-                    "min_8S_over_sumS": float(np.min(split_scores)) if split_scores.size else float("nan"),
-                    "min_nonzero_gap": _min_nonzero_gap(split_scores),
+                    "val_roc_auc": float(val_scores["roc_auc"]),
+                    "val_ap": float(val_scores["average_precision"]),
+                    "test_roc_auc": float(test_scores["roc_auc"]),
+                    "test_ap": float(test_scores["average_precision"]),
+                    f"edge_overlap[{overlap_name}]": float(overlap),
                 }
             )
-        split_score_table = pd.DataFrame(split_score_rows)
-        split_score_tables.append(split_score_table)
-        print("raw-S edge score diagnostics (8*S[i,j] / sum_uv S[u,v]):")
-        print(split_score_table.to_string(index=False))
+            budget_generated_stats.append(graph_stats)
 
-        val_scores = link_prediction_scores_from_transition_matrix(
-            S,
-            positive_edges=lp_split["val_edges"],
-            negative_edges=lp_split["val_non_edges"],
-            walk_type=eval_walk_type,
-            score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
-        )
-        test_scores = link_prediction_scores_from_transition_matrix(
-            S,
-            positive_edges=lp_split["test_edges"],
-            negative_edges=lp_split["test_non_edges"],
-            walk_type=eval_walk_type,
-            score_symmetrization=eval_info.get("score_symmetrization", args.score_symmetrization),
-        )
-        graph_stats = compute_graph_statistics(A_hat, labels=reference_labels)
-        overlap = edge_overlap_ratio(A_hat, overlap_adj)
-
-        generated_results.append(
-            {
-                "graph_id": graph_idx,
-                "val_roc_auc": float(val_scores["roc_auc"]),
-                "val_ap": float(val_scores["average_precision"]),
-                "test_roc_auc": float(test_scores["roc_auc"]),
-                "test_ap": float(test_scores["average_precision"]),
-                f"edge_overlap[{overlap_name}]": float(overlap),
-            }
-        )
-        generated_stats_rows.append(graph_stats)
+        saved_score_matrices_by_budget[int(generated_walks)] = budget_saved_score_matrices
+        for metric in reference_stats.keys():
+            values = [r.get(metric, np.nan) for r in budget_generated_stats]
+            graph_report_rows.append(
+                {
+                    "final_generated_walks": int(generated_walks),
+                    "metric": metric,
+                    "reference": reference_stats[metric],
+                    "generated_mean": float(np.nanmean(values)) if values else float("nan"),
+                    "generated_std": float(np.nanstd(values)) if values else float("nan"),
+                }
+            )
 
     lp_table = pd.DataFrame(generated_results)
-    stats_table = pd.DataFrame(generated_stats_rows)
+    stats_table = pd.DataFrame(graph_report_rows)
     split_score_table = pd.concat(split_score_tables, ignore_index=True)
 
     print("\nlink prediction results:")
     print(lp_table.to_string(index=False))
 
-    metric_names = list(reference_stats.keys())
-    report_rows = []
-    for metric in metric_names:
-        row = {"metric": metric, "reference": reference_stats[metric]}
-        values = [r.get(metric, np.nan) for r in generated_stats_rows]
-        row["generated_mean"] = float(np.nanmean(values)) if values else float("nan")
-        row["generated_std"] = float(np.nanstd(values)) if values else float("nan")
-        report_rows.append(row)
-    graph_report = pd.DataFrame(report_rows)
+    graph_report = stats_table
     print("\ngraph statistics:")
     print(graph_report.to_string(index=False))
 
@@ -324,19 +355,29 @@ def run_final_evaluation(
         lp_table.to_csv(out_dir / "final_eval_link_prediction.csv", index=False)
         graph_report.to_csv(out_dir / "final_eval_graph_stats.csv", index=False)
         split_score_table.to_csv(out_dir / "final_eval_score_diagnostics.csv", index=False)
-        if len(saved_score_matrices) == 1:
-            np.save(out_dir / "final_eval_score_matrix.npy", saved_score_matrices[0])
+        if len(walk_budgets) == 1:
+            saved_score_matrices = saved_score_matrices_by_budget[int(walk_budgets[0])]
+            if len(saved_score_matrices) == 1:
+                np.save(out_dir / "final_eval_score_matrix.npy", saved_score_matrices[0])
+            else:
+                np.save(out_dir / "final_eval_score_matrices.npy", np.stack(saved_score_matrices, axis=0))
         else:
-            np.save(out_dir / "final_eval_score_matrices.npy", np.stack(saved_score_matrices, axis=0))
+            for generated_walks, mats in saved_score_matrices_by_budget.items():
+                suffix = f"{int(generated_walks)}"
+                if len(mats) == 1:
+                    np.save(out_dir / f"final_eval_score_matrix_{suffix}.npy", mats[0])
+                else:
+                    np.save(out_dir / f"final_eval_score_matrices_{suffix}.npy", np.stack(mats, axis=0))
         meta = {
             "dataset_name": args.dataset_name,
             "walk_type": args.walk_type,
             "score_symmetrization": args.score_symmetrization,
             "edge_overlap_target": args.edge_overlap_target,
-            "final_generated_walks": int(args.final_generated_walks),
+            "final_generated_walks_list": walk_budgets,
             "final_max_length": int(final_max_length),
             "generation_batch_size": int(args.generation_batch_size),
             "gpu_transition_counts": bool(getattr(args, "gpu_transition_counts", False)),
+            "debug": bool(getattr(args, "debug", False)),
             "num_generated_graphs": int(args.num_generated_graphs),
             "reconstruction_seed": int(args.reconstruction_seed),
             "checkpoint_dir": str(checkpoint_dir) if checkpoint_dir is not None else None,

@@ -84,6 +84,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument( #???
         "--progress-mode",
         type=str,
@@ -95,6 +96,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--n-embd", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--save-dir", type=str, default=None)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--resume-from-latest", action="store_true")
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument(
@@ -112,7 +114,6 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-generation-batch-size", type=int, default=None)
     parser.add_argument("--gpu-transition-counts", action="store_true")
-    parser.add_argument("--report-sampling-timing", action="store_true")
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--eval-max-length", type=int, default=None)
     parser.add_argument(
@@ -121,7 +122,6 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         choices=["max", "sum", "none"],
         default=None,
     )
-    parser.add_argument("--debug-graph-reconstruction", action="store_true")
     parser.add_argument("--target-edge-overlap", type=float, default=0.5)
     parser.add_argument(
         "--edge-overlap-target",
@@ -535,6 +535,47 @@ def maybe_save_checkpoint(
     torch.save(optimizer.state_dict(), out_dir / f"optimizer_epoch_{epoch:03d}.pt")
 
 
+def save_model_to_subdir(
+    model: FacialGen,
+    save_dir: str | None,
+    subdir: str,
+) -> Path | None:
+    if save_dir is None:
+        return None
+
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = out_dir / str(subdir)
+    model.save_pretrained(str(target_dir))
+    return target_dir
+
+
+def save_best_val_metadata(
+    *,
+    save_dir: str | None,
+    epoch: int,
+    score: float,
+) -> None:
+    if save_dir is None:
+        return
+
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checkpoint_dir": str(out_dir / "final"),
+        "epoch": int(epoch),
+        "val_score": float(score),
+    }
+    (out_dir / "best_val_checkpoint.json").write_text(json.dumps(payload, indent=2))
+
+
+def should_save_periodic_checkpoint(epoch: int, checkpoint_every: int) -> bool:
+    checkpoint_every = int(checkpoint_every)
+    if checkpoint_every <= 0:
+        return False
+    return int(epoch) % checkpoint_every == 0
+
+
 def maybe_resume_training(
     model: FacialGen,
     optimizer: AdamW,
@@ -595,6 +636,8 @@ def save_final_training_artifacts(
     history: list[dict[str, float]],
     args: argparse.Namespace,
     save_dir: str | None,
+    *,
+    save_model_to_final: bool = True,
 ) -> None:
     if save_dir is None:
         return
@@ -602,8 +645,9 @@ def save_final_training_artifacts(
     out_dir = Path(save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    final_dir = out_dir / "final"
-    model.save_pretrained(str(final_dir))
+    if save_model_to_final:
+        final_dir = out_dir / "final"
+        model.save_pretrained(str(final_dir))
     (out_dir / "history.json").write_text(json.dumps(history, indent=2))
     (out_dir / "train_args.json").write_text(
         json.dumps(vars(args), indent=2, sort_keys=True)
@@ -700,6 +744,8 @@ def train_model(
     print(f"Eval generation max_length: {eval_max_length}")
     print(f"Eval generation batch_size: {eval_generation_batch_size}")
     print(f"Eval transition counts on device: {bool(getattr(args, 'gpu_transition_counts', False))}")
+    print(f"Debug mode: {bool(getattr(args, 'debug', False))}")
+    print(f"Checkpoint cadence: every {int(getattr(args, 'checkpoint_every', 1))} epoch(s)")
     history: list[dict[str, float]] = load_history_snapshot(args.save_dir)
 
     for epoch in range(start_epoch, args.epochs):
@@ -795,7 +841,7 @@ def train_model(
                     else None
                 ),
                 gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
-                report_timing=bool(getattr(args, "report_sampling_timing", False)),
+                report_timing=bool(getattr(args, "debug", False)),
             )
 
             if args.early_stop_mode == "val":
@@ -812,12 +858,12 @@ def train_model(
                     score_symmetrization=score_symmetrization,
                     show_progress=(
                         progress_mode == "tqdm"
-                        and bool(getattr(args, "debug_graph_reconstruction", False))
+                        and bool(getattr(args, "debug", False))
                     ),
                     progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
                     debug=(
                         progress_mode == "log"
-                        or bool(getattr(args, "debug_graph_reconstruction", False))
+                        or bool(getattr(args, "debug", False))
                     ),
                 )
                 scores = link_prediction_scores_from_transition_matrix(
@@ -843,6 +889,14 @@ def train_model(
                 epoch_record["val_ap"] = float(scores["average_precision"])
                 epoch_record["val_score"] = float(val_score)
                 epoch_record["edge_overlap"] = float(overlap_value)
+                improved = val_score > early_state.best_value + early_state.min_delta
+                if improved:
+                    save_model_to_subdir(model, args.save_dir, "final")
+                    save_best_val_metadata(
+                        save_dir=args.save_dir,
+                        epoch=epoch + 1,
+                        score=val_score,
+                    )
                 should_stop = early_state.update(val_score, step=epoch + 1)
                 history.append(epoch_record)
                 save_history_snapshot(history, args.save_dir)
@@ -866,12 +920,12 @@ def train_model(
                     score_symmetrization=score_symmetrization,
                     show_progress=(
                         progress_mode == "tqdm"
-                        and bool(getattr(args, "debug_graph_reconstruction", False))
+                        and bool(getattr(args, "debug", False))
                     ),
                     progress_desc=f"graph reconstruction @ epoch {epoch + 1}",
                     debug=(
                         progress_mode == "log"
-                        or bool(getattr(args, "debug_graph_reconstruction", False))
+                        or bool(getattr(args, "debug", False))
                     ),
                 )
                 ref_num_edges = int(eval_info["num_reference_edges"])
@@ -916,9 +970,16 @@ def train_model(
             history.append(epoch_record)
             save_history_snapshot(history, args.save_dir)
 
-        maybe_save_checkpoint(model, optimizer, epoch + 1, args.save_dir)
+        if should_save_periodic_checkpoint(epoch + 1, getattr(args, "checkpoint_every", 1)):
+            maybe_save_checkpoint(model, optimizer, epoch + 1, args.save_dir)
 
-    save_final_training_artifacts(model, history, args, args.save_dir)
+    save_final_training_artifacts(
+        model,
+        history,
+        args,
+        args.save_dir,
+        save_model_to_final=(args.early_stop_mode != "val"),
+    )
     return model, eval_info, history
 
 
