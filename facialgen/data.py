@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from .rotation_systems import facial_walks_from_curvature_signs
+from .curvature import largest_connected_component
 
 try:
     import torch
@@ -38,6 +40,62 @@ def load_graph_dataset_sparse(
     """
     dataset_key = dataset_name.strip().lower().replace("-", "_")
 
+    root = Path(pyg_root) if pyg_root is not None else Path(data_dir) / "pyg"
+    data_root = Path(data_dir)
+
+    def _load_npz_graph(file_name: Path) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
+        with np.load(file_name, allow_pickle=False) as loader:
+            A = sp.csr_matrix(
+                (loader["adj_data"], loader["adj_indices"], loader["adj_indptr"]),
+                shape=tuple(loader["adj_shape"]),
+            )
+            if "attr_data" in loader:
+                X = sp.csr_matrix(
+                    (loader["attr_data"], loader["attr_indices"], loader["attr_indptr"]),
+                    shape=tuple(loader["attr_shape"]),
+                )
+            else:
+                X = sp.eye(A.shape[0], format="csr", dtype=np.float64)
+            labels = loader.get("labels")
+            if labels is None:
+                y_arr = np.full(A.shape[0], -1, dtype=np.int64)
+            else:
+                y_arr = np.asarray(labels, dtype=np.int64)
+
+        A = sp.csr_matrix(A, dtype=np.float64)
+        X = sp.csr_matrix(X, dtype=np.float64)
+        return A, X, y_arr
+
+    def _download_file(url: str, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, target)
+
+    def _load_coraml_zuegner() -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
+        npz_path = data_root / "zuegner" / "cora_ml.npz"
+        if not npz_path.exists():
+            url = "https://raw.githubusercontent.com/danielzuegner/gnn-meta-attack/master/data/cora_ml.npz"
+            _download_file(url, npz_path)
+        A, X, y_arr = _load_npz_graph(npz_path)
+
+        # Match the NetGAN/Zuegner preprocessing:
+        # symmetrize, binarize, keep the largest connected component, remove diagonal.
+        A = sp.csr_matrix(A, dtype=np.float64)
+        A = A + A.T
+        A = A.tolil()
+        A[A > 1] = 1
+        A = A.tocsr()
+        A_lcc, nodes = largest_connected_component(A)
+        A_lcc = A_lcc.tolil()
+        A_lcc.setdiag(0.0)
+        A_lcc = A_lcc.astype(np.float64).tocsr()
+        A_lcc.eliminate_zeros()
+        X = sp.csr_matrix(X[nodes], dtype=np.float64)
+        y_arr = np.asarray(y_arr[nodes], dtype=np.int64)
+        return A_lcc, X, y_arr
+
+    if dataset_key in {"coraml", "cora_ml"}:
+        return _load_coraml_zuegner()
+
     try:
         datasets_mod = importlib.import_module("torch_geometric.datasets")
     except ImportError as exc:
@@ -45,13 +103,8 @@ def load_graph_dataset_sparse(
             "load_graph_dataset_sparse requires torch_geometric. Install PyG to use this loader."
         ) from exc
 
-    root = Path(pyg_root) if pyg_root is not None else Path(data_dir) / "pyg"
-
     try:
-        if dataset_key in {"coraml", "cora_ml"}:
-            CitationFull = getattr(datasets_mod, "CitationFull")
-            dataset = CitationFull(root=str(root), name="cora_ml")
-        elif dataset_key == "pubmed":
+        if dataset_key == "pubmed":
             Planetoid = getattr(datasets_mod, "Planetoid")
             dataset = Planetoid(root=str(root), name="PubMed")
         elif dataset_key == "citeseer":
