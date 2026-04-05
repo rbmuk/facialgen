@@ -73,7 +73,7 @@ def load_graph_dataset_sparse(
     def _load_coraml_zuegner() -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray]:
         npz_path = data_root / "zuegner" / "cora_ml.npz"
         if not npz_path.exists():
-            url = "https://raw.githubusercontent.com/danielzuegner/gnn-meta-attack/master/data/cora_ml.npz"
+            url = "https://raw.githubusercontent.com/danielzuegner/netgan/master/data/cora_ml.npz"
             _download_file(url, npz_path)
         A, X, y_arr = _load_npz_graph(npz_path)
 
