@@ -12,7 +12,13 @@ import torch
 from torch.optim import AdamW
 from tqdm.auto import tqdm
 
-from .curvature import largest_connected_component, resistance_curvature
+from .curvature import (
+    largest_connected_component,
+    lin_lu_yau_curvature,
+    ollivier_ricci_curvature,
+    resistance_curvature,
+    steinerberger_curvature,
+)
 from .data import (
     CyclicFaceChunkDataset,
     FacialWalkVertexDataset,
@@ -55,6 +61,19 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         choices=["facial", "facial_online", "random"],
         default="facial",
     )
+    parser.add_argument(
+        "--facial-walk-method",
+        type=str,
+        choices=[
+            "resistance",
+            "steinerberger",
+            "ollivier_ricci",
+            "lin_lu_yau",
+            "lly",
+            "random_rotations",
+        ],
+        default="resistance",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--second-order-p", type=float, default=1.0)
     parser.add_argument("--second-order-q", type=float, default=1.0)
@@ -91,6 +110,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--split-seed", type=int, default=123)
     parser.add_argument("--eval-generated-walks", type=int, default=4096)
     parser.add_argument("--eval-generation-batch-size", type=int, default=None)
+    parser.add_argument("--gpu-transition-counts", action="store_true")
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--eval-max-length", type=int, default=None)
     parser.add_argument(
@@ -179,8 +199,17 @@ def default_random_walk_generation_max_length(
 
 
 def build_run_name(args: argparse.Namespace) -> str:
+    def _normalize_run_method(method: str) -> str:
+        normalized = str(method).strip().lower().replace("-", "_")
+        return {
+            "lly": "lin_lu_yau",
+        }.get(normalized, normalized)
+
     dataset_name = str(getattr(args, "dataset_name", "dataset"))
     walk_type = str(getattr(args, "walk_type", "walk"))
+    facial_walk_method = _normalize_run_method(
+        getattr(args, "facial_walk_method", "resistance")
+    )
     early_stop_mode = str(getattr(args, "early_stop_mode", "none"))
     train_fraction = getattr(args, "train_fraction", None)
     stop_tag = {
@@ -194,7 +223,9 @@ def build_run_name(args: argparse.Namespace) -> str:
         else ""
     )
     return (
-        f"{dataset_name}_{walk_type}_{stop_tag}{train_tag}_"
+        f"{dataset_name}_{walk_type}_"
+        f"{facial_walk_method if walk_type.startswith('facial') else 'na'}_"
+        f"{stop_tag}{train_tag}_"
         f"L{int(getattr(args, 'n_layer', 0))}_"
         f"H{int(getattr(args, 'n_head', 0))}_"
         f"D{int(getattr(args, 'n_embd', 0))}"
@@ -221,11 +252,47 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
     FacialGen,
     dict[str, object],
 ]:
+    def _normalize_facial_walk_method(method: str) -> str:
+        normalized = str(method).strip().lower().replace("-", "_")
+        return {
+            "lly": "lin_lu_yau",
+        }.get(normalized, normalized)
+
+    def _compute_facial_walk_curvature(
+        A: sp.csr_matrix,
+        *,
+        method: str,
+        rhs_scale: float,
+    ) -> np.ndarray:
+        method = _normalize_facial_walk_method(method)
+        if method == "resistance":
+            return resistance_curvature(
+                A,
+                use_lcc=False,
+                solver="lstsq",
+                rhs_scale=rhs_scale,
+            )
+        if method == "steinerberger":
+            return steinerberger_curvature(A, use_lcc=False)
+        if method == "ollivier_ricci":
+            return ollivier_ricci_curvature(A, use_lcc=False)
+        if method == "lin_lu_yau":
+            return lin_lu_yau_curvature(A, use_lcc=False)
+        if method == "random_rotations":
+            return np.zeros(A.shape[0], dtype=float)
+        raise ValueError(f"Unsupported facial_walk_method={method!r}")
+
     vertex_context_size = _vertex_context_size_from_args(args)
     A_full, X, y = load_graph_dataset_sparse(
         args.dataset_name,
         data_dir=args.data_dir,
     )
+    A_full = sp.csr_matrix(A_full)
+    A_full = A_full.maximum(A_full.T).astype(np.float64)
+    A_full.setdiag(0.0)
+    A_full.eliminate_zeros()
+    if A_full.nnz > 0:
+        A_full.data[:] = 1.0
     A_lcc, nodes_lcc = largest_connected_component(A_full)
     n_lcc = A_lcc.shape[0]
     ref_num_edges = int(sp.triu(A_lcc, k=1).nnz)
@@ -312,21 +379,25 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
                 f"{train_num_edges / max(ref_num_edges, 1):.3f} of full graph)"
             )
 
-    curvature = resistance_curvature(
-        train_adj,
-        use_lcc=False,
-        solver="lstsq",
-        rhs_scale=float(n_lcc),
-    )
-
     walk_type = getattr(args, "walk_type", "facial")
+    facial_walk_method = _normalize_facial_walk_method(
+        getattr(args, "facial_walk_method", "resistance")
+    )
     eval_walk_type = "facial" if walk_type == "facial_online" else walk_type
+    curvature = None
+    if walk_type in {"facial", "facial_online"}:
+        curvature = _compute_facial_walk_curvature(
+            train_adj,
+            method=facial_walk_method,
+            rhs_scale=float(n_lcc),
+        )
     if walk_type == "facial":
         face_ds = FacialWalkVertexDataset(
             train_adj,
             curvature,
             num_sign_configs=args.num_sign_configs,
             sign_seed=args.sign_seed,
+            facial_walk_method=facial_walk_method,
         )
         train_ds = CyclicFaceChunkDataset(
             face_ds,
@@ -346,6 +417,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
             vertex_context_size=vertex_context_size,
             epoch_seed=args.epoch_seed,
             sign_seed=args.sign_seed,
+            facial_walk_method=facial_walk_method,
         )
         bos_token_id = train_ds.bos_token_id
         eos_token_id = train_ds.eos_token_id
@@ -402,6 +474,8 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
 
     print(f"Dataset: {args.dataset_name}")
     print(f"Walk type: {walk_type}")
+    if walk_type in {"facial", "facial_online"}:
+        print(f"Facial walk method: {facial_walk_method}")
     print(f"LCC nodes: {n_lcc}")
     print(dataset_size_desc)
     print(sample_count_desc)
@@ -417,6 +491,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[
         "holdout_adj": holdout_adj,
         "reference_labels": np.asarray(y)[nodes_lcc],
         "train_adj": train_adj,
+        "facial_walk_method": facial_walk_method,
         "num_nodes": n_lcc,
         "num_reference_edges": ref_num_edges,
         "num_train_edges": train_num_edges,
@@ -615,6 +690,7 @@ def train_model(
     )
     print(f"Eval generation max_length: {eval_max_length}")
     print(f"Eval generation batch_size: {eval_generation_batch_size}")
+    print(f"Eval transition counts on device: {bool(getattr(args, 'gpu_transition_counts', False))}")
     history: list[dict[str, float]] = load_history_snapshot(args.save_dir)
 
     for epoch in range(start_epoch, args.epochs):
@@ -709,6 +785,7 @@ def train_model(
                     if progress_mode == "log"
                     else None
                 ),
+                gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
             )
 
             if args.early_stop_mode == "val":

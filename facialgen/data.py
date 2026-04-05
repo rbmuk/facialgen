@@ -8,7 +8,11 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 
-from .rotation_systems import facial_walks_from_curvature_signs
+from .rotation_systems import (
+    enumerate_facial_walks_from_rotation,
+    facial_walks_from_curvature_signs,
+    random_rotation_system,
+)
 
 try:
     import torch
@@ -221,6 +225,23 @@ def _csr_neighbor_sets(A: sp.spmatrix) -> list[set[int]]:
     return [set(map(int, nbrs.tolist())) for nbrs in _csr_neighbor_lists(A)]
 
 
+def _build_config_dart_faces(
+    A: sp.spmatrix,
+    curvature: np.ndarray,
+    sign_vec: np.ndarray,
+    *,
+    facial_walk_method: str,
+    rng: np.random.Generator | None,
+) -> list[list[tuple[int, int]]]:
+    method = str(facial_walk_method).strip().lower().replace("-", "_")
+    if method == "lly":
+        method = "lin_lu_yau"
+    if method == "random_rotations":
+        rotation = random_rotation_system(A, rng=rng)
+        return enumerate_facial_walks_from_rotation(rotation, rng=rng)
+    return facial_walks_from_curvature_signs(A, curvature, sign_vec, rng=rng)
+
+
 def build_face_vertex_sequences(
     A: sp.spmatrix,
     curvature: np.ndarray,
@@ -229,6 +250,7 @@ def build_face_vertex_sequences(
     sign_seed: int | None = None,
     signs: np.ndarray | None = None,
     bos_token_id: int | None = None,
+    facial_walk_method: str = "resistance",
 ) -> dict[str, Any]:
     """
     Generate full facial walks from curvature-sign rotations.
@@ -243,12 +265,14 @@ def build_face_vertex_sequences(
     """
     A = sp.csr_matrix(A)
     num_nodes = int(A.shape[0])
+    facial_walk_method = str(facial_walk_method).strip().lower().replace("-", "_")
 
-    curvature = np.asarray(curvature, dtype=float)
-    if curvature.shape != (num_nodes,):
-        raise ValueError(
-            f"curvature must have shape ({num_nodes},), got {curvature.shape}"
-        )
+    if facial_walk_method != "random_rotations":
+        curvature = np.asarray(curvature, dtype=float)
+        if curvature.shape != (num_nodes,):
+            raise ValueError(
+                f"curvature must have shape ({num_nodes},), got {curvature.shape}"
+            )
 
     if signs is None:
         sign_matrix = _sample_sign_configurations(
@@ -274,7 +298,13 @@ def build_face_vertex_sequences(
     face_index_within_config: list[int] = []
 
     for config_idx, sign_vec in enumerate(sign_matrix):
-        config_dart_faces = facial_walks_from_curvature_signs(A, curvature, sign_vec)
+        config_dart_faces = _build_config_dart_faces(
+            A,
+            curvature,
+            sign_vec,
+            facial_walk_method=facial_walk_method,
+            rng=None,
+        )
         for face_idx, dart_face in enumerate(config_dart_faces):
             vertex_face = _dart_face_to_faithful_vertex_sequence(list(dart_face))
             tokens = vertex_face.copy()
@@ -316,6 +346,7 @@ class FacialWalkVertexDataset(Dataset):
         sign_seed: int | None = None,
         signs: np.ndarray | None = None,
         bos_token_id: int | None = None,
+        facial_walk_method: str = "resistance",
     ) -> None:
         _require_torch()
 
@@ -326,6 +357,7 @@ class FacialWalkVertexDataset(Dataset):
             sign_seed=sign_seed,
             signs=signs,
             bos_token_id=bos_token_id,
+            facial_walk_method=facial_walk_method,
         )
 
         self.sequences: list[np.ndarray] = built["sequences"]
@@ -542,12 +574,14 @@ class OnlineFacialWalkChunkDataset(Dataset):
         sign_seed: int = 0,
         bos_token_id: int | None = None,
         pad_token_id: int | None = None,
+        facial_walk_method: str = "resistance",
     ) -> None:
         _require_torch()
 
         self.A = sp.csr_matrix(A)
         self.num_nodes = int(self.A.shape[0])
         self.curvature = np.asarray(curvature, dtype=float)
+        self.facial_walk_method = str(facial_walk_method).strip().lower().replace("-", "_")
         self.num_sign_configs = int(num_sign_configs)
         if self.num_sign_configs <= 0:
             raise ValueError("num_sign_configs must be positive.")
@@ -594,10 +628,11 @@ class OnlineFacialWalkChunkDataset(Dataset):
             rng = np.random.default_rng(
                 self.epoch_seed + 1_000_003 * self.epoch + 97_003 * config_idx
             )
-            dart_faces = facial_walks_from_curvature_signs(
+            dart_faces = _build_config_dart_faces(
                 self.A,
                 self.curvature,
                 sign_vec,
+                facial_walk_method=self.facial_walk_method,
                 rng=rng,
             )
             for face_idx, face in enumerate(dart_faces):

@@ -96,6 +96,60 @@ def _counts_dict_to_csr(
     return sp.coo_matrix((vals, (rows, cols)), shape=(num_nodes, num_nodes)).tocsr()
 
 
+def _update_transition_counts_dense_tensor(
+    counts_tensor,
+    sequences: list[list[int]],
+    *,
+    num_nodes: int,
+    walk_type: str,
+) -> None:
+    import torch
+
+    walk_type = str(walk_type)
+    if not sequences:
+        return
+
+    seq_tensor = torch.as_tensor(sequences, dtype=torch.long, device=counts_tensor.device)
+    if seq_tensor.ndim != 2:
+        return
+
+    verts = seq_tensor[:, 1:]
+    if walk_type == "facial":
+        even_len = verts.shape[1] - (verts.shape[1] % 2)
+        if even_len <= 0:
+            return
+        u = verts[:, :even_len:2].reshape(-1)
+        v = verts[:, 1:even_len:2].reshape(-1)
+    elif walk_type == "random":
+        if verts.shape[1] < 2:
+            return
+        u = verts[:, :-1].reshape(-1)
+        v = verts[:, 1:].reshape(-1)
+    else:
+        raise ValueError(f"Unsupported walk_type={walk_type!r}")
+
+    valid = (
+        (0 <= u) & (u < int(num_nodes))
+        & (0 <= v) & (v < int(num_nodes))
+        & (u != v)
+    )
+    if not torch.any(valid):
+        return
+
+    flat = u[valid] * int(num_nodes) + v[valid]
+    uniq, freq = torch.unique(flat, return_counts=True)
+    counts_tensor.view(-1).index_add_(0, uniq, freq.to(dtype=counts_tensor.dtype))
+
+
+def _dense_tensor_to_csr(counts_tensor) -> sp.csr_matrix:
+    import torch
+
+    counts_cpu = counts_tensor.detach().to("cpu")
+    if counts_cpu.dtype != torch.float64:
+        counts_cpu = counts_cpu.to(torch.float64)
+    return sp.csr_matrix(counts_cpu.numpy())
+
+
 def _sample_constrained_facial_batch(
     model,
     *,
@@ -566,6 +620,7 @@ def sample_model_transition_counts(
     show_progress: bool = False,
     progress_desc: str = "sampling walks",
     log_every_samples: int | None = None,
+    gpu_transition_counts: bool = False,
 ) -> sp.csr_matrix:
     """
     Sample token sequences batch-by-batch and accumulate the transition count
@@ -588,7 +643,16 @@ def sample_model_transition_counts(
         if getattr(getattr(model, "config", None), "pad_token_id", None) is not None
         else getattr(hf_config, "pad_token_id", bos_token_id)
     )
-    counts: dict[tuple[int, int], float] = {}
+    if gpu_transition_counts:
+        counts_tensor = torch.zeros(
+            (int(num_nodes), int(num_nodes)),
+            dtype=torch.float32,
+            device=device,
+        )
+        counts = None
+    else:
+        counts = {}
+        counts_tensor = None
     pbar = tqdm(
         total=remaining,
         desc=progress_desc,
@@ -621,12 +685,20 @@ def sample_model_transition_counts(
                 )
             else:
                 raise ValueError(f"Unsupported walk_type={walk_type!r}")
-            _update_transition_counts(
-                counts,
-                sequences,
-                num_nodes=num_nodes,
-                walk_type=walk_type,
-            )
+            if counts_tensor is not None:
+                _update_transition_counts_dense_tensor(
+                    counts_tensor,
+                    sequences,
+                    num_nodes=num_nodes,
+                    walk_type=walk_type,
+                )
+            else:
+                _update_transition_counts(
+                    counts,
+                    sequences,
+                    num_nodes=num_nodes,
+                    walk_type=walk_type,
+                )
             remaining -= cur_batch
             pbar.update(cur_batch)
             if log_every_samples is not None and log_every_samples > 0:
@@ -636,4 +708,6 @@ def sample_model_transition_counts(
                     print(f"{progress_desc}: sampled {sampled}/{int(num_samples)}")
 
     pbar.close()
+    if counts_tensor is not None:
+        return _dense_tensor_to_csr(counts_tensor)
     return _counts_dict_to_csr(counts, num_nodes=num_nodes)

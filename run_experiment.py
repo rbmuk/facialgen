@@ -213,6 +213,7 @@ def run_final_evaluation(
                 if progress_mode == "log"
                 else None
             ),
+            gpu_transition_counts=bool(getattr(args, "gpu_transition_counts", False)),
         )
         saved_score_matrices.append(np.asarray(S.toarray(), dtype=np.float64))
 
@@ -334,6 +335,7 @@ def run_final_evaluation(
             "final_generated_walks": int(args.final_generated_walks),
             "final_max_length": int(final_max_length),
             "generation_batch_size": int(args.generation_batch_size),
+            "gpu_transition_counts": bool(getattr(args, "gpu_transition_counts", False)),
             "num_generated_graphs": int(args.num_generated_graphs),
             "reconstruction_seed": int(args.reconstruction_seed),
             "checkpoint_dir": str(checkpoint_dir) if checkpoint_dir is not None else None,
