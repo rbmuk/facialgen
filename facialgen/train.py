@@ -207,6 +207,11 @@ def build_run_name(args: argparse.Namespace) -> str:
             "lly": "lin_lu_yau",
         }.get(normalized, normalized)
 
+    def _fraction_tag(prefix: str, value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{prefix}{float(value):.2f}".replace(".", "p")
+
     dataset_name = str(getattr(args, "dataset_name", "dataset"))
     walk_type = str(getattr(args, "walk_type", "walk"))
     facial_walk_method = _normalize_run_method(
@@ -214,20 +219,20 @@ def build_run_name(args: argparse.Namespace) -> str:
     )
     early_stop_mode = str(getattr(args, "early_stop_mode", "none"))
     train_fraction = getattr(args, "train_fraction", None)
+    val_fraction = getattr(args, "val_fraction", None)
+    test_fraction = getattr(args, "test_fraction", None)
     stop_tag = {
         "edge_overlap": "eo",
         "val": "val",
         "none": "none",
     }.get(early_stop_mode, early_stop_mode)
-    train_tag = (
-        f"_T{float(train_fraction):.2f}".replace(".", "p")
-        if train_fraction is not None
-        else ""
-    )
+    train_tag = _fraction_tag("T", train_fraction)
+    val_tag = _fraction_tag("V", val_fraction)
+    test_tag = _fraction_tag("E", test_fraction)
     return (
         f"{dataset_name}_{walk_type}_"
         f"{facial_walk_method if walk_type.startswith('facial') else 'na'}_"
-        f"{stop_tag}{train_tag}_"
+        f"{stop_tag}_{val_tag}_{test_tag}{train_tag}_"
         f"L{int(getattr(args, 'n_layer', 0))}_"
         f"H{int(getattr(args, 'n_head', 0))}_"
         f"D{int(getattr(args, 'n_embd', 0))}"
