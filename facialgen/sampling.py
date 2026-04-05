@@ -176,10 +176,19 @@ def _sample_constrained_facial_batch(
             device=device,
         )
 
-    sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(batch_size)]
-    sampled_vertices: list[list[int]] = [[] for _ in range(batch_size)]
-    pending_copy = np.zeros(batch_size, dtype=bool)
-    finished = np.zeros(batch_size, dtype=bool)
+    if max_length <= 0:
+        return [[] for _ in range(batch_size)]
+    if max_length == 1:
+        return [[int(bos_token_id)] for _ in range(batch_size)]
+
+    vertex_vocab = int(bos_token_id)
+    batch_idx = torch.arange(batch_size, device=device)
+    sequences = torch.empty(
+        (batch_size, max_length),
+        dtype=torch.long,
+        device=device,
+    )
+    sequences[:, 0] = int(bos_token_id)
 
     input_ids = torch.full(
         (batch_size, 1),
@@ -194,70 +203,33 @@ def _sample_constrained_facial_batch(
     )
     past_key_values = outputs.past_key_values
     next_token_logits = outputs.logits[:, -1, :]
+    first_sampled = None
+    last_sampled = None
+    sampled_count = 0
+    pos = 1
 
-    while not np.all(finished):
-        need_model_rows = np.flatnonzero(~finished & ~pending_copy)
-        if need_model_rows.size > 0:
-            masked_logits = next_token_logits[need_model_rows].clone()
+    while pos < max_length:
+        masked_logits = next_token_logits[:, :vertex_vocab].clone()
+        if sampled_count > 0:
+            invalid_partner = first_sampled if sampled_count <= 2 else last_sampled
+            masked_logits[batch_idx, invalid_partner] = -float("inf")
 
-            # Only vertex ids are valid generation targets during evaluation.
-            # We intentionally disallow EOS here so every sampled sequence grows
-            # to the requested cap.
-            masked_logits[:, bos_token_id:] = -float("inf")
-            for batch_row, row_idx in enumerate(need_model_rows.tolist()):
-                verts = sampled_vertices[row_idx]
-                if not verts:
-                    continue
-                if len(verts) <= 2:
-                    partner = int(verts[0])
-                else:
-                    partner = int(verts[-1])
-                if 0 <= partner < bos_token_id:
-                    masked_logits[batch_row, partner] = -float("inf")
+        probs = torch.softmax(masked_logits, dim=-1)
+        sampled_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        sequences[:, pos] = sampled_tokens
+        pos += 1
 
-            probs = torch.softmax(masked_logits, dim=-1)
-            sampled_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-        else:
-            sampled_tokens = None
+        prev_sampled = last_sampled
+        sampled_count += 1
+        if sampled_count == 1:
+            first_sampled = sampled_tokens
+        last_sampled = sampled_tokens
 
-        step_tokens = torch.full(
-            (batch_size,),
-            fill_value=int(pad_token_id),
-            dtype=torch.long,
-            device=device,
-        )
-        active_any = False
-
-        for batch_row, row_idx in enumerate(need_model_rows.tolist()):
-            token = int(sampled_tokens[batch_row].item())
-            sequences[row_idx].append(token)
-            sampled_vertices[row_idx].append(token)
-            step_tokens[row_idx] = token
-            active_any = True
-
-            if len(sampled_vertices[row_idx]) >= 3:
-                pending_copy[row_idx] = True
-            if len(sequences[row_idx]) >= max_length:
-                finished[row_idx] = True
-                pending_copy[row_idx] = False
-
-        copy_rows = np.flatnonzero(~finished & pending_copy)
-        for row_idx in copy_rows.tolist():
-            verts = sampled_vertices[row_idx]
-            copied = verts[0] if len(verts) == 3 else verts[-2]
-            sequences[row_idx].append(int(copied))
-            step_tokens[row_idx] = int(copied)
-            pending_copy[row_idx] = False
-            active_any = True
-
-            if len(sequences[row_idx]) >= max_length:
-                finished[row_idx] = True
-
-        if not active_any:
+        if pos >= max_length:
             break
 
         outputs = hf_model(
-            input_ids=step_tokens.unsqueeze(1),
+            input_ids=sampled_tokens.unsqueeze(1),
             past_key_values=past_key_values,
             use_cache=True,
             return_dict=True,
@@ -265,7 +237,26 @@ def _sample_constrained_facial_batch(
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
 
-    return sequences
+        if sampled_count < 3:
+            continue
+
+        copied_tokens = first_sampled if sampled_count == 3 else prev_sampled
+        sequences[:, pos] = copied_tokens
+        pos += 1
+
+        if pos >= max_length:
+            break
+
+        outputs = hf_model(
+            input_ids=copied_tokens.unsqueeze(1),
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token_logits = outputs.logits[:, -1, :]
+
+    return sequences.detach().cpu().tolist()
 
 
 def _sample_constrained_facial_batch_legacy(
@@ -412,7 +403,19 @@ def _sample_random_walk_batch(
             device=device,
         )
 
-    sequences: list[list[int]] = [[int(bos_token_id)] for _ in range(batch_size)]
+    if max_length <= 0:
+        return [[] for _ in range(batch_size)]
+    if max_length == 1:
+        return [[int(bos_token_id)] for _ in range(batch_size)]
+
+    vertex_vocab = int(bos_token_id)
+    batch_idx = torch.arange(batch_size, device=device)
+    sequences = torch.empty(
+        (batch_size, max_length),
+        dtype=torch.long,
+        device=device,
+    )
+    sequences[:, 0] = int(bos_token_id)
 
     input_ids = torch.full(
         (batch_size, 1),
@@ -428,22 +431,16 @@ def _sample_random_walk_batch(
     past_key_values = outputs.past_key_values
     next_token_logits = outputs.logits[:, -1, :]
 
-    for _ in range(max_length - 1):
-        masked_logits = next_token_logits.clone()
-        masked_logits[:, bos_token_id:] = -float("inf")
-
-        for row_idx in range(batch_size):
-            seq = sequences[row_idx]
-            if len(seq) >= 2:
-                prev_vertex = int(seq[-1])
-                if 0 <= prev_vertex < bos_token_id:
-                    masked_logits[row_idx, prev_vertex] = -float("inf")
-
+    for pos in range(1, max_length):
+        masked_logits = next_token_logits[:, :vertex_vocab].clone()
+        if pos >= 2:
+            masked_logits[batch_idx, sequences[:, pos - 1]] = -float("inf")
         probs = torch.softmax(masked_logits, dim=-1)
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        sequences[:, pos] = next_tokens
 
-        for row_idx in range(batch_size):
-            sequences[row_idx].append(int(next_tokens[row_idx].item()))
+        if pos == max_length - 1:
+            break
 
         outputs = hf_model(
             input_ids=next_tokens.unsqueeze(1),
@@ -454,7 +451,7 @@ def _sample_random_walk_batch(
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
 
-    return sequences
+    return sequences.detach().cpu().tolist()
 
 
 def _sample_random_walk_batch_legacy(
