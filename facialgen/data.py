@@ -36,6 +36,7 @@ def load_graph_dataset_sparse(
 
     Supported names:
     - `coraml`, `cora_ml`
+    - `dblp`
     - `pubmed`
     - `citeseer`
     - `polblogs`
@@ -55,6 +56,9 @@ def load_graph_dataset_sparse(
         if dataset_key in {"coraml", "cora_ml"}:
             CitationFull = getattr(datasets_mod, "CitationFull")
             dataset = CitationFull(root=str(root), name="cora_ml")
+        elif dataset_key == "dblp":
+            CitationFull = getattr(datasets_mod, "CitationFull")
+            dataset = CitationFull(root=str(root), name="dblp")
         elif dataset_key == "pubmed":
             Planetoid = getattr(datasets_mod, "Planetoid")
             dataset = Planetoid(root=str(root), name="PubMed")
@@ -67,7 +71,7 @@ def load_graph_dataset_sparse(
         else:
             raise ValueError(
                 f"Unsupported dataset_name={dataset_name!r}. "
-                "Supported values are: coraml, pubmed, citeseer, polblogs."
+                "Supported values are: coraml, dblp, pubmed, citeseer, polblogs."
             )
     except Exception as exc:
         raise RuntimeError(

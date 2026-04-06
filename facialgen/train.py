@@ -48,7 +48,7 @@ def add_training_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         "--dataset-name",
         type=str,
         default="coraml",
-        choices=["coraml", "cora_ml", "pubmed", "citeseer", "polblogs"],
+        choices=["coraml", "cora_ml", "dblp", "pubmed", "citeseer", "polblogs"],
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--data-dir", type=str, default="data")
